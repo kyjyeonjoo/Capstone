@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>블랙박스 영상 DB 자동 추출기</title>
+    <link rel="stylesheet" href="styles.css">
+    <!-- Google Fonts: Inter -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <!-- 상단 헤더 영역 -->
+        <header class="glass-panel">
+            <h1>🚦 블랙박스 위반차량 DB 추출기</h1>
+            <p>영상을 분석하여 객체(자동차, 신호등)의 BBox 좌표를 <b>object_detection</b> 테이블 형태로 자동 구성합니다.</p>
+        </header>
+
+        <!-- 파일 업로드 영역 -->
+        <main class="upload-section glass-panel" id="drop-zone">
+            <div class="upload-content">
+                <svg class="upload-icon" xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="17 8 12 3 7 8"></polyline>
+                    <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+                <h2>이곳에 영상(.mp4)을 드래그하세요</h2>
+                <p>또는 클릭하여 파일을 선택하세요</p>
+                <input type="file" id="file-input" accept="video/mp4,video/avi" hidden>
+            </div>
+        </main>
+
+        <!-- 로딩 애니메이션 영역 (평소엔 숨김) -->
+        <div id="loading-overlay" class="hidden glass-panel">
+            <div class="spinner"></div>
+            <h2 id="loading-text">YOLOv5 추론 엔진 구동 중...</h2>
+            <p>영상의 프레임을 분리하여 BBox를 추적하고 있습니다. (시간이 다소 소요될 수 있습니다)</p>
+        </div>
+
+        <!-- 결과물 테이블 영역 (평소엔 숨김) -->
+        <section id="result-section" class="hidden glass-panel">
+            <div class="result-header">
+                <h2>📊 추출 완료된 DB 레코드</h2>
+                <span id="summary-badge" class="badge">총 객체 수: 0개</span>
+            </div>
+            
+            <div class="table-container">
+                <table id="db-table">
+                    <thead>
+                        <tr>
+                            <th>ID (PK)</th>
+                            <th>Video_ID (FK)</th>
+                            <th>Frame</th>
+                            <th>Track ID</th>
+                            <th>Object Type</th>
+                            <th>BBox (X1, Y1, X2, Y2)</th>
+                            <th>Confidence</th>
+                        </tr>
+                    </thead>
+                    <tbody id="table-body">
+                        <!-- JS에서 동적으로 채워집니다 -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </div>
+
+    <script src="app.js?v=2"></script>
+</body>
+</html>

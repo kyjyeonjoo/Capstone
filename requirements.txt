@@ -2,3 +2,13 @@ fastapi
 uvicorn
 supabase
 python-dotenv
+python-multipart
+pydantic
+torch
+torchvision
+opencv-python
+pandas
+requests
+pyyaml
+tqdm
+seaborn

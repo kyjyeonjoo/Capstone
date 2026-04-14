@@ -1,0 +1,15 @@
+# AI 모델 가중치 제외 (용량 초과 방지)
+*.pt
+models/
+
+# Python 임시 파일 및 캐시 제외
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 사용자 업로드 임시 스토리지 제외
+backend/temp_uploads/
+temp_uploads/
+
+# 기타 불필요 파일
+.DS_Store
