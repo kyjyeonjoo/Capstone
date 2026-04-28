@@ -19,18 +19,35 @@ def compute_iou(boxA, boxB):
     iou = interArea / float(boxAArea + boxBArea - interArea + 1e-5)
     return iou
 
-class IoUTracker:
-    def __init__(self, iou_thresh=0.1, max_frames=3):
-        self.tracks = {}  # {track_id: {"box": [x1, y1, x2, y2], "frames_missing": 0}}
+def extract_histogram(frame, bbox):
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+    crop = frame[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None
+    hsv_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    hist = cv2.calcHist([hsv_crop], [0, 1], None, [50, 60], [0, 180, 0, 256])
+    cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
+    return hist
+
+class HistIoUTracker:
+    def __init__(self, iou_thresh=0.1, max_frames=3, missing_history=150):
+        self.tracks = {}  # {track_id: {"box": bbox, "frames_missing": 0, "hist": hist}}
+        self.history = {} # 휴지통 {track_id: {"hist": hist, "frames_missing": 0}}
         self.next_id = 1
         self.iou_thresh = iou_thresh
         self.max_frames = max_frames
+        self.missing_history = missing_history
 
-    def update(self, detected_boxes):
+    def update(self, detected_boxes, frame):
+        for det in detected_boxes:
+            det["hist"] = extract_histogram(frame, det["bbox"])
+
         if len(self.tracks) == 0:
             for det in detected_boxes:
                 det["track_id"] = self.next_id
-                self.tracks[self.next_id] = {"box": det["bbox"], "frames_missing": 0}
+                self.tracks[self.next_id] = {"box": det["bbox"], "frames_missing": 0, "hist": det["hist"]}
                 self.next_id += 1
             return detected_boxes
 
@@ -38,6 +55,7 @@ class IoUTracker:
         unmatched_tracks = list(self.tracks.keys())
         matches = []
 
+        # 1. IoU 매칭
         for d_idx, det in enumerate(detected_boxes):
             best_iou = self.iou_thresh
             best_t_id = -1
@@ -56,18 +74,68 @@ class IoUTracker:
             detected_boxes[d_idx]["track_id"] = t_id
             self.tracks[t_id]["box"] = detected_boxes[d_idx]["bbox"]
             self.tracks[t_id]["frames_missing"] = 0
+            if detected_boxes[d_idx]["hist"] is not None:
+                self.tracks[t_id]["hist"] = detected_boxes[d_idx]["hist"]
 
+        # 2. 색상 히스토그램 재식별 (Re-ID)
+        reid_matches = []
+        matched_history = set()
+        
+        # 아직 휴지통(history)에 가지 않았지만 프레임에서 사라져서 IoU 매칭에 실패한 기존 트랙들도 모두 색상 검사 풀에 넣습니다.
+        candidate_pool = {}
+        for t_id in unmatched_tracks:
+            candidate_pool[t_id] = self.tracks[t_id]
+        for t_id, data in self.history.items():
+            candidate_pool[t_id] = data
+            
+        for d_idx in unmatched_dets:
+            det_hist = detected_boxes[d_idx]["hist"]
+            if det_hist is None: continue
+            
+            best_score = 0.50  # 빡빡했던 유사도 기준을 살짝 완화
+            best_t_id = -1
+            for t_id, t_data in candidate_pool.items():
+                if t_id in matched_history: continue
+                if t_data["hist"] is not None:
+                    score = cv2.compareHist(det_hist, t_data["hist"], cv2.HISTCMP_CORREL)
+                    if score > best_score:
+                        best_score = score
+                        best_t_id = t_id
+                        
+            if best_t_id != -1:
+                reid_matches.append((d_idx, best_t_id))
+                matched_history.add(best_t_id)
+                
+        for d_idx, t_id in reid_matches:
+            detected_boxes[d_idx]["track_id"] = t_id
+            self.tracks[t_id] = {
+                "box": detected_boxes[d_idx]["bbox"],
+                "frames_missing": 0,
+                "hist": detected_boxes[d_idx]["hist"]
+            }
+            if t_id in self.history:
+                del self.history[t_id]
+            if t_id in unmatched_tracks:
+                unmatched_tracks.remove(t_id)
+            unmatched_dets.remove(d_idx)
+
+        # 3. 매칭 안 된 객체 새 ID 부여
         for d_idx in unmatched_dets:
             detected_boxes[d_idx]["track_id"] = self.next_id
-            self.tracks[self.next_id] = {"box": detected_boxes[d_idx]["bbox"], "frames_missing": 0}
+            self.tracks[self.next_id] = {"box": detected_boxes[d_idx]["bbox"], "frames_missing": 0, "hist": detected_boxes[d_idx]["hist"]}
             self.next_id += 1
 
+        # 4. 사라진 객체 휴지통(History) 이동 처리
         for t_id in unmatched_tracks:
             self.tracks[t_id]["frames_missing"] += 1
-            
-        for t_id in list(self.tracks.keys()):
             if self.tracks[t_id]["frames_missing"] > self.max_frames:
+                self.history[t_id] = {"hist": self.tracks[t_id]["hist"], "frames_missing": 0}
                 del self.tracks[t_id]
+                
+        for t_id in list(self.history.keys()):
+            self.history[t_id]["frames_missing"] += 1
+            if self.history[t_id]["frames_missing"] > self.missing_history:
+                del self.history[t_id]
 
         return detected_boxes
 
@@ -93,12 +161,12 @@ def analyze_video_with_yolo(video_path, weights_paths, video_id="WEB_UP_001"):
             for m_name, path in weights_paths.items():
                 # 인터넷 다운로드 대신 로컬(source='local') 리포지토리 사용
                 loaded = torch.hub.load(repo_or_dir=yolo_repo_dir, model='custom', path=path, source='local', force_reload=False)
-                loaded.conf = 0.25
+                loaded.conf = 0.70
                 models[m_name] = loaded
         else:
             # 하위호환을 위해 단일 문자열 경로일 경우
             loaded = torch.hub.load(repo_or_dir=yolo_repo_dir, model='custom', path=weights_paths, source='local', force_reload=False)
-            loaded.conf = 0.25 
+            loaded.conf = 0.70 
             models = {"기본": loaded}
     finally:
         torch.load = _original_load
@@ -116,7 +184,7 @@ def analyze_video_with_yolo(video_path, weights_paths, video_id="WEB_UP_001"):
     extracted_records = []
     frame_idx = 0
     processed_count = 0
-    tracker = IoUTracker(iou_thresh=0.1, max_frames=3)
+    tracker = HistIoUTracker(iou_thresh=0.1, max_frames=3, missing_history=150)
     
     while True:
         ret, frame = cap.read()
@@ -158,7 +226,7 @@ def analyze_video_with_yolo(video_path, weights_paths, video_id="WEB_UP_001"):
                 merged_detections.append(det)
             
         # 통합된 BBox들을 트래커에 통과시켜 track_id 부여
-        tracked_detections = tracker.update(merged_detections)
+        tracked_detections = tracker.update(merged_detections, frame)
         
         for det in tracked_detections:
             record = {

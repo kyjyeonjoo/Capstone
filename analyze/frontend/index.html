@@ -3,68 +3,279 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>블랙박스 영상 DB 자동 추출기</title>
-    <link rel="stylesheet" href="styles.css">
-    <!-- Google Fonts: Inter -->
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <title>AI 교통사고 법률 보조 시스템</title>
+    <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
-    <div class="app-container">
-        <!-- 상단 헤더 영역 -->
-        <header class="glass-panel">
-            <h1>🚦 블랙박스 위반차량 DB 추출기</h1>
-            <p>영상을 분석하여 객체(자동차, 신호등)의 BBox 좌표를 <b>object_detection</b> 테이블 형태로 자동 구성합니다.</p>
-        </header>
-
-        <!-- 파일 업로드 영역 -->
-        <main class="upload-section glass-panel" id="drop-zone">
-            <div class="upload-content">
-                <svg class="upload-icon" xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                    <polyline points="17 8 12 3 7 8"></polyline>
-                    <line x1="12" y1="3" x2="12" y2="15"></line>
+    <div id="app">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="brand">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
                 </svg>
-                <h2>이곳에 영상(.mp4)을 드래그하세요</h2>
-                <p>또는 클릭하여 파일을 선택하세요</p>
-                <input type="file" id="file-input" accept="video/mp4,video/avi" hidden>
-            </div>
-        </main>
-
-        <!-- 로딩 애니메이션 영역 (평소엔 숨김) -->
-        <div id="loading-overlay" class="hidden glass-panel">
-            <div class="spinner"></div>
-            <h2 id="loading-text">YOLOv5 추론 엔진 구동 중...</h2>
-            <p>영상의 프레임을 분리하여 BBox를 추적하고 있습니다. (시간이 다소 소요될 수 있습니다)</p>
-        </div>
-
-        <!-- 결과물 테이블 영역 (평소엔 숨김) -->
-        <section id="result-section" class="hidden glass-panel">
-            <div class="result-header">
-                <h2>📊 추출 완료된 DB 레코드</h2>
-                <span id="summary-badge" class="badge">총 객체 수: 0개</span>
+                <span>AI 법률 보조</span>
             </div>
             
-            <div class="table-container">
-                <table id="db-table">
-                    <thead>
-                        <tr>
-                            <th>ID (PK)</th>
-                            <th>Video_ID (FK)</th>
-                            <th>Frame</th>
-                            <th>Track ID</th>
-                            <th>Object Type</th>
-                            <th>BBox (X1, Y1, X2, Y2)</th>
-                            <th>Confidence</th>
-                        </tr>
-                    </thead>
-                    <tbody id="table-body">
-                        <!-- JS에서 동적으로 채워집니다 -->
-                    </tbody>
-                </table>
+            <div class="nav-tabs">
+                <div class="nav-tab active" data-target="upload-view">영상분석</div>
+                <div class="nav-tab" data-target="chat-view">채팅</div>
             </div>
-        </section>
+            
+            <div class="sidebar-content">
+                <!-- History List (Shown only when logged in) -->
+                <div class="history-list">
+                    <div class="history-item" style="display: none;">
+                        <span>사거리 신호위반 건</span>
+                        <div class="history-actions">
+                            <button class="action-btn" title="이름바꾸기">✏️</button>
+                            <button class="action-btn" title="삭제">🗑️</button>
+                        </div>
+                    </div>
+                    <div class="history-item" style="display: none;">
+                        <span>오토바이 헬멧 미착용</span>
+                        <div class="history-actions">
+                            <button class="action-btn" title="이름바꾸기">✏️</button>
+                            <button class="action-btn" title="삭제">🗑️</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="sidebar-footer">
+                <!-- Non Logged-in state -->
+                <button id="loginBtn" class="btn btn-secondary btn-block">🔒 로그인</button>
+                
+                <!-- Logged-in state -->
+                <div id="userProfile" class="user-profile" style="display: none;">
+                    <div class="avatar">U</div>
+                    <span style="flex: 1; font-size: 0.9rem;">사용자</span>
+                    <span style="font-size: 0.8rem; color: var(--text-secondary);">▼</span>
+                    
+                    <div id="userPopover" class="user-popover">
+                        <div class="popover-item">👤 회원정보</div>
+                        <div class="popover-item" id="logoutBtn" style="color: var(--danger);">🚪 로그아웃</div>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            
+            <!-- VIEW 1: Video Upload & Analyze -->
+            <div id="upload-view" class="view active">
+                <div class="upload-container">
+                    <h2 style="margin-bottom: 0.5rem;">영상 분석 시작하기</h2>
+                    <p style="color: var(--text-secondary); margin-bottom: 1rem;">블랙박스 영상이나 CCTV 녹화본을 업로드해주세요.</p>
+                    
+                    <div id="dropzone" class="dropzone">
+                        <div class="drop-icon">📁</div>
+                        <h3 style="margin-bottom: 0.5rem; color: var(--text-primary);">영상 업로드</h3>
+                        <p style="color: var(--text-secondary); font-size: 0.9rem;">드래그 앤 드롭 또는 클릭하여 영상 추가</p>
+                        <p style="color: #94a3b8; font-size: 0.8rem; margin-top: 1rem;">MP4, AVI 파일 지원</p>
+                        <input type="file" id="videoUpload" accept="video/mp4,video/x-m4v,video/*" style="display: none;">
+                    </div>
+                    
+                    <div class="upload-actions">
+                        <button id="executeAnalysisBtn" class="btn btn-primary btn-block" style="font-size: 1.1rem; padding: 1rem;">
+                            ✨ 영상 분석 실행 버튼
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- VIEW 1.5: Extracted Objects -->
+            <div id="objects-view" class="view">
+                <div class="result-header">
+                    <h2>영상 분석 완료 <span style="font-size: 1rem; color: var(--text-secondary); font-weight: normal; margin-left: 0.5rem;">객체 탐지 결과 내역</span></h2>
+                    <button class="btn btn-primary" onclick="document.getElementById('resultViewBtn').click()">법률·과실비율 판단 보기 ▶</button>
+                    <!-- hidden mock button for switchView without polluting global scope in inline js -->
+                    <button id="resultViewBtn" style="display:none;" data-target="result-view"></button>
+                </div>
+                
+                <div class="result-card" style="margin-bottom: 1.5rem;">
+                    <div style="display: flex; gap: 2rem; margin-bottom: 1rem;">
+                        <div>
+                            <span style="color: var(--text-secondary); font-size: 0.9rem;">총 처리 프레임 수</span>
+                            <div id="objTotalFrames" style="font-size: 1.5rem; font-weight: bold; color: var(--text-primary);">-</div>
+                        </div>
+                        <div>
+                            <span style="color: var(--text-secondary); font-size: 0.9rem;">탐지된 사물/이벤트 수</span>
+                            <div id="objTotalCount" style="font-size: 1.5rem; font-weight: bold; color: var(--accent);">-</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="result-card">
+                    <h3 class="card-title">🎥 탐지 기록 상세 (YOLOv5)</h3>
+                    <div style="max-height: 400px; overflow-y: auto; margin-top: 1rem;">
+                        <table style="width: 100%; border-collapse: collapse; text-align: left;">
+                            <thead style="position: sticky; top: 0; background: var(--card-bg);">
+                                <tr style="border-bottom: 2px solid var(--card-border);">
+                                    <th style="padding: 0.75rem; color: var(--text-secondary); font-weight: 600;">시간(Frame)</th>
+                                    <th style="padding: 0.75rem; color: var(--text-secondary); font-weight: 600;">객체 종류</th>
+                                    <th style="padding: 0.75rem; color: var(--text-secondary); font-weight: 600;">신뢰도(Conf)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="objRecordsTable">
+                                <!-- JS mapped dynamically -->
+                                <tr>
+                                    <td colspan="3" style="padding: 1rem; text-align: center; color: var(--text-secondary);">데이터가 없습니다.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- VIEW 2: Analysis Result -->
+            <div id="result-view" class="view">
+                <div class="result-header">
+                    <h2>사거리 신호위반 건 <span style="font-size: 1rem; color: var(--text-secondary); font-weight: normal; margin-left: 0.5rem;">영상 분석 결과</span></h2>
+                    <div style="display: flex; gap: 0.5rem;">
+                        <button class="btn btn-secondary" onclick="document.getElementById('backToObjectsBtn').click()">◀ 탐지 내역 다시보기</button>
+                        <button class="btn btn-secondary" onclick="document.querySelector('[data-target=\'chat-view\']').click()">💬 관련 내용으로 채팅하기</button>
+                    </div>
+                    <!-- hidden mock button -->
+                    <button id="backToObjectsBtn" style="display:none;" data-target="objects-view"></button>
+                </div>
+                
+                <div class="result-grid">
+                    <!-- Fault Ratio -->
+                    <div class="result-card">
+                        <h3 class="card-title">⚖️ 과실 비율</h3>
+                        <div class="fault-ratio-display">
+                            <div style="text-align: center;">
+                                <div class="ratio-circle a">
+                                    <span class="ratio-value">80</span>
+                                </div>
+                                <div style="margin-top: 0.5rem; font-size: 0.9rem; color: var(--text-secondary);">업로드 차주 (A)</div>
+                            </div>
+                            <div style="font-size: 1.5rem; font-weight: bold; color: var(--text-secondary);">:</div>
+                            <div style="text-align: center;">
+                                <div class="ratio-circle b">
+                                    <span class="ratio-value">20</span>
+                                </div>
+                                <div style="margin-top: 0.5rem; font-size: 0.9rem; color: var(--text-secondary);">상대 차주 (B)</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Judgment Ground -->
+                    <div class="result-card">
+                        <h3 class="card-title">🔍 판단 근거 설명</h3>
+                        <div class="law-content">
+                            <p>입력된 영상 분석 결과, <strong>명확한 적색 신호위반</strong>이 탐지되었습니다.</p>
+                            <p>교차로 진입 전 적색 불이 켜졌음에도 정지선을 위반하여 그대로 진입하였으며, 정상 신호에 직진하는 차량의 측면을 추돌하는 사고가 발생하였습니다.</p>
+                            <ul>
+                                <li><strong>탐지 객체 유무:</strong> 신호등 객체(Red)</li>
+                                <li><strong>차량 상태:</strong> 감속 시도 없음 확인</li>
+                            </ul>
+                        </div>
+                    </div>
+                    
+                    <!-- Precedent Information -->
+                    <div class="result-card full-width">
+                        <h3 class="card-title">📚 관련 법률 및 판례 정보 제공</h3>
+                        <div class="law-content">
+                            <p><strong>[도로교통법 제5조 (신호 또는 지시에 따를 의무)]</strong></p>
+                            <p>운전자는 교통안전시설이 표시하는 신호 또는 지시와 교통정리를 하는 국가경찰공무원등의 신호나 지시를 따라야 한다.</p>
+                            <hr style="border:0; border-top: 1px solid #e2e8f0; margin: 1rem 0;">
+                            <p><strong>[관련 판례] 대법원 2003. 1. 10. 선고 2002도5506 판결</strong></p>
+                            <p>교통신호기가 설치된 교차로에서 적색신호를 무시하고 진입한 운전자에게 전적인 과실이 있다고 본 판례로, 신호 변경 시점과 교차로 통과 시점에 대한 면밀한 조사가 뒷받침될 경우 가해자의 과실비율이 100%까지 산정될 수 있는 전형적인 신호위반 사고 사례에 해당합니다.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- VIEW 3: Chat -->
+            <div id="chat-view" class="view">
+                <div class="chat-container">
+                    <div class="chat-header">
+                        <select class="input-control" style="max-width: 300px; background: var(--bg-main); border-color: transparent;">
+                            <option>사거리 신호위반 건</option>
+                            <option>오토바이 헬멧 미착용 건</option>
+                        </select>
+                        <span style="font-size: 0.8rem; color: var(--success); display: flex; align-items: center; gap: 0.3rem;">
+                            <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--success); display: inline-block;"></span> AI 법률 챗봇 온라인
+                        </span>
+                    </div>
+                    
+                    <div class="chat-messages">
+                        <div class="message bot">
+                            안녕하세요. 선택하신 <strong>'사거리 신호위반 건'</strong> 영상 분석 결과에 대해 궁금한 점이 있으신가요?<br><br>
+                            과실 비율 재조정 가능성이나 비슷한 판례의 손해배상액 등에 대해 질문해 보세요.
+                        </div>
+                        <div class="message user">
+                            만약 상대방이 과속을 했다면 제 과실이 줄어들 수 있나요?
+                        </div>
+                        <div class="message bot">
+                            네, 상대 차량의 명확한 과속 사실(제한속도 20km/h 초과 등)이 입증될 경우 기본 과실비율(80:20)에서 <strong>10~20% 정도 가해자의 과실이 경감</strong>될 수 있습니다.<br>블랙박스 영상에서 상대방의 속도를 추정할 수 있는지 추가 분석을 진행할까요?
+                        </div>
+                    </div>
+                    
+                    <div class="chat-input-area">
+                        <input type="text" class="chat-input" placeholder="법률 보조 챗봇에게 메시지를 입력하세요...">
+                        <button class="send-btn">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <line x1="22" y1="2" x2="11" y2="13"></line>
+                                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+        </main>
     </div>
 
-    <script src="app.js?v=2"></script>
+    <!-- Auth Modal Overlay -->
+    <div id="authModal" class="modal-overlay">
+        <div class="modal">
+            <button class="close-modal">&times;</button>
+            <h2 style="text-align: center; margin-bottom: 1.5rem; color: var(--text-primary);">시스템 접속</h2>
+            
+            <div class="modal-tabs">
+                <div class="modal-tab active" data-target="loginFormView">로그인</div>
+                <div class="modal-tab" data-target="signupFormView">회원가입</div>
+            </div>
+            
+            <!-- Login Form -->
+            <div id="loginFormView" class="form-view active">
+                <form>
+                    <div class="input-group">
+                        <label>이메일</label>
+                        <input type="email" class="input-control" placeholder="user@example.com">
+                    </div>
+                    <div class="input-group">
+                        <label>비밀번호</label>
+                        <input type="password" class="input-control" placeholder="••••••••">
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-block" style="margin-top: 1rem;">로그인</button>
+                </form>
+            </div>
+            
+            <!-- Signup Form -->
+            <div id="signupFormView" class="form-view">
+                <form>
+                    <div class="input-group">
+                        <label>이메일</label>
+                        <div class="inline-input">
+                            <input type="email" class="input-control" placeholder="user@example.com">
+                            <button type="button" class="btn btn-secondary">중복확인</button>
+                        </div>
+                    </div>
+                    <div class="input-group">
+                        <label>비밀번호</label>
+                        <input type="password" class="input-control" placeholder="새 비밀번호 입력">
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-block" style="margin-top: 1rem;">회원가입</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/app.js"></script>
 </body>
 </html>
