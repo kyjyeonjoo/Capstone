@@ -1,9 +1,10 @@
 import os
 import shutil
 import uuid
+import requests
 from pydantic import BaseModel
 from fastapi.responses import JSONResponse
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client
@@ -51,6 +52,8 @@ WEIGHTS_PATHS = {
 TEMP_DIR = "temp_uploads"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
+from typing import Optional
+
 class AnalyzeResponse(BaseModel):
     total_frames: int
     object_count: int
@@ -59,17 +62,113 @@ class AnalyzeResponse(BaseModel):
 class UserAuth(BaseModel):
     email: str
     password: str
+    nickname: Optional[str] = None
+
+class EmailCheck(BaseModel):
+    email: str
+
+class ResetPassword(BaseModel):
+    email: str
+
+class ProfileUpdate(BaseModel):
+    nickname: Optional[str] = None
+    password: Optional[str] = None
+
+from supabase import ClientOptions
+
+@app.post("/api/update-profile")
+def update_profile(req: Request, data: ProfileUpdate):
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+        
+    auth_header = req.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="인증 토큰이 없습니다.")
+    token = auth_header.split(" ")[1]
+    
+    try:
+        update_data = {}
+        if data.password:
+            update_data["password"] = data.password
+        if data.nickname:
+            update_data["data"] = {"nickname": data.nickname}
+            
+        # Supabase Python 클라이언트의 세션 에러("Auth session missing!")를 우회하기 위해 REST API 직접 호출
+        url = f"{SUPABASE_URL}/auth/v1/user"
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        response = requests.put(url, headers=headers, json=update_data)
+        
+        if not response.ok:
+            error_msg = response.json().get("msg", "변경 실패")
+            raise HTTPException(status_code=400, detail=error_msg)
+            
+        user_data = response.json()
+        user_id = user_data.get("id")
+        
+        if data.nickname and user_id:
+            try:
+                supabase.table("users").update({"nickname": data.nickname}).eq("id", user_id).execute()
+            except Exception as e:
+                print("public.users 닉네임 업데이트 실패:", e)
+            
+        return {"message": "회원정보가 수정되었습니다.", "nickname": data.nickname}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/check-email")
+def check_email(data: EmailCheck):
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    try:
+        res = supabase.table("users").select("email").eq("email", data.email).execute()
+        if res.data and len(res.data) > 0:
+            return {"exists": True, "message": "이미 가입된 이메일입니다."}
+        return {"exists": False, "message": "사용 가능한 이메일입니다."}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="중복 확인 기능 에러 (users 테이블 확인 필요): " + str(e))
+
+@app.post("/api/reset-password")
+def reset_password(data: ResetPassword):
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    try:
+        supabase.auth.reset_password_email(data.email)
+        return {"message": "비밀번호 재설정 이메일이 발송되었습니다."}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/signup")
 def signup(user: UserAuth):
     if not supabase:
         raise HTTPException(status_code=500, detail="Supabase not configured")
     try:
-        # Supabase Auth 회원가입
-        res = supabase.auth.sign_up({"email": user.email, "password": user.password})
+        # Supabase Auth 회원가입 (닉네임 데이터 추가)
+        options = {}
+        if user.nickname:
+            options = {
+                "data": {
+                    "nickname": user.nickname
+                }
+            }
+            
+        res = supabase.auth.sign_up({
+            "email": user.email, 
+            "password": user.password,
+            "options": options
+        })
+        
         return {"message": "회원가입이 완료되었습니다.", "user": res.user.email if res.user else user.email}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        error_msg = str(e)
+        if "already registered" in error_msg.lower():
+            raise HTTPException(status_code=400, detail="이미 가입된 이메일입니다.")
+        raise HTTPException(status_code=400, detail=error_msg)
 
 @app.post("/api/login")
 def login(user: UserAuth):
@@ -78,7 +177,17 @@ def login(user: UserAuth):
     try:
         # Supabase Auth 로그인
         res = supabase.auth.sign_in_with_password({"email": user.email, "password": user.password})
-        return {"message": "로그인 성공", "token": res.session.access_token, "user": res.user.email}
+        
+        nickname = "사용자"
+        if res.user and getattr(res.user, 'user_metadata', None) and "nickname" in res.user.user_metadata:
+            nickname = res.user.user_metadata["nickname"]
+            
+        return {
+            "message": "로그인 성공", 
+            "token": res.session.access_token, 
+            "user": res.user.email,
+            "nickname": nickname
+        }
     except Exception as e:
         raise HTTPException(status_code=401, detail="이메일 또는 비밀번호가 잘못되었습니다.")
 

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI 교통사고 법률 보조 시스템</title>
-    <link rel="stylesheet" href="css/styles.css">
+    <link rel="stylesheet" href="css/styles.css?v=3">
 </head>
 <body>
     <div id="app">
@@ -53,7 +53,7 @@
                     <span style="font-size: 0.8rem; color: var(--text-secondary);">▼</span>
                     
                     <div id="userPopover" class="user-popover">
-                        <div class="popover-item">👤 회원정보</div>
+                        <div class="popover-item" id="profileMenuBtn">👤 회원정보</div>
                         <div class="popover-item" id="logoutBtn" style="color: var(--danger);">🚪 로그아웃</div>
                     </div>
                 </div>
@@ -253,6 +253,9 @@
                         <input type="password" id="loginPassword" class="input-control" placeholder="••••••••" required>
                     </div>
                     <button type="submit" class="btn btn-primary btn-block" style="margin-top: 1rem;">로그인</button>
+                    <div style="text-align: center; margin-top: 1rem;">
+                        <a href="#" id="forgotPasswordLink" style="font-size: 0.85rem; color: var(--text-secondary); text-decoration: underline;">비밀번호 찾기</a>
+                    </div>
                 </form>
             </div>
             
@@ -263,15 +266,52 @@
                         <label>이메일</label>
                         <div class="inline-input">
                             <input type="email" id="signupEmail" class="input-control" placeholder="user@example.com" required>
-                            <button type="button" class="btn btn-secondary">중복확인</button>
+                            <button type="button" id="checkEmailBtn" class="btn btn-secondary">중복확인</button>
                         </div>
                     </div>
                     <div class="input-group">
+                        <label>닉네임</label>
+                        <input type="text" id="signupNickname" class="input-control" placeholder="닉네임을 입력해주세요" required>
+                    </div>
+                    <div class="input-group">
                         <label>비밀번호</label>
-                        <input type="password" id="signupPassword" class="input-control" placeholder="새 비밀번호 입력" required>
+                        <input type="password" id="signupPassword" class="input-control" placeholder="비밀번호는 6자 이상으로 해주세요" required>
                     </div>
                     <button type="submit" class="btn btn-primary btn-block" style="margin-top: 1rem;">회원가입</button>
                 </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div id="toastContainer" class="toast-container"></div>
+
+    <!-- Profile Modal Overlay -->
+    <div id="profileModal" class="modal-overlay">
+        <div class="modal">
+            <button class="close-modal">&times;</button>
+            <h2 id="profileModalTitle" style="text-align: center; margin-bottom: 1.5rem; color: var(--text-primary);">회원정보 수정</h2>
+            
+            <div class="form-view active">
+                <div id="profileNonPasswordSection">
+                    <div class="input-group">
+                        <label>이메일</label>
+                        <input type="email" id="profileEmail" class="input-control" disabled style="background: var(--bg-main); cursor: not-allowed; opacity: 0.7;">
+                    </div>
+                    <div class="input-group">
+                        <label>닉네임</label>
+                        <div class="inline-input">
+                            <input type="text" id="profileNickname" class="input-control" placeholder="새로운 닉네임 입력">
+                            <button type="button" id="updateNicknameBtn" class="btn btn-secondary">변경</button>
+                        </div>
+                    </div>
+                    <hr style="margin: 1.5rem 0; border: 0; border-top: 1px solid var(--card-border);">
+                </div>
+                <div class="input-group">
+                    <label>새 비밀번호</label>
+                    <input type="password" id="profilePassword" class="input-control" placeholder="새 비밀번호 (6자 이상)">
+                </div>
+                <button type="button" id="updatePasswordBtn" class="btn btn-primary btn-block">비밀번호 변경</button>
             </div>
         </div>
     </div>
