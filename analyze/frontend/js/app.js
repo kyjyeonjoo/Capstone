@@ -80,21 +80,92 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Mock Login Submit
-    const loginForm = document.getElementById('loginFormView');
-    const loginSubmitBtn = loginForm.querySelector('.btn-primary');
+    // --- Real Authentication (Supabase) ---
+    const realLoginForm = document.getElementById('realLoginForm');
+    const realSignupForm = document.getElementById('realSignupForm');
     
-    loginSubmitBtn.addEventListener('click', (e) => {
-        e.preventDefault(); // prevent actual submit
+    // 페이지 로드 시 기존 로그인 유지
+    const savedToken = localStorage.getItem('access_token');
+    const savedUser = localStorage.getItem('user_email');
+    if (savedToken && savedUser) {
         isLoggedIn = true;
-        authModal.classList.remove('active');
-        updateUIState();
-    });
+    }
 
-    // Mock Logout
+    if (realLoginForm) {
+        realLoginForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const email = document.getElementById('loginEmail').value;
+            const password = document.getElementById('loginPassword').value;
+            const submitBtn = realLoginForm.querySelector('button[type="submit"]');
+            
+            submitBtn.textContent = '로그인 중...';
+            submitBtn.disabled = true;
+
+            try {
+                const res = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email, password })
+                });
+                const data = await res.json();
+                
+                if (!res.ok) throw new Error(data.detail || '로그인 실패');
+                
+                // 로그인 성공
+                localStorage.setItem('access_token', data.token);
+                localStorage.setItem('user_email', data.user);
+                isLoggedIn = true;
+                
+                alert('로그인 성공!');
+                authModal.classList.remove('active');
+                updateUIState();
+            } catch (err) {
+                alert(err.message);
+            } finally {
+                submitBtn.textContent = '로그인';
+                submitBtn.disabled = false;
+            }
+        });
+    }
+
+    if (realSignupForm) {
+        realSignupForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const email = document.getElementById('signupEmail').value;
+            const password = document.getElementById('signupPassword').value;
+            const submitBtn = realSignupForm.querySelector('button[type="submit"]');
+            
+            submitBtn.textContent = '처리 중...';
+            submitBtn.disabled = true;
+
+            try {
+                const res = await fetch('/api/signup', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email, password })
+                });
+                const data = await res.json();
+                
+                if (!res.ok) throw new Error(data.detail || '회원가입 실패');
+                
+                alert('회원가입이 완료되었습니다. 확인 이메일을 체크하거나 바로 로그인해보세요.');
+                // 탭 전환 (회원가입 -> 로그인)
+                document.querySelector('.modal-tab[data-target="loginFormView"]').click();
+            } catch (err) {
+                alert(err.message);
+            } finally {
+                submitBtn.textContent = '회원가입';
+                submitBtn.disabled = false;
+            }
+        });
+    }
+
+    // Logout
     const logoutBtn = document.getElementById('logoutBtn');
     if(logoutBtn) {
         logoutBtn.addEventListener('click', () => {
+            localStorage.removeItem('access_token');
+            localStorage.removeItem('user_email');
             isLoggedIn = false;
             userPopover.classList.remove('show');
             updateUIState();
@@ -103,8 +174,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function updateUIState() {
         if(isLoggedIn) {
+            const currentUser = localStorage.getItem('user_email') || '사용자';
             loginBtnNode.style.display = 'none';
             userProfileNode.style.display = 'flex';
+            // 표시 이름 업데이트
+            userProfileNode.querySelector('span').textContent = currentUser;
             // Show history items in sidebar
             document.querySelectorAll('.history-item').forEach(el => {
                 el.style.display = 'flex';

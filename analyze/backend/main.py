@@ -1,10 +1,27 @@
-from fastapi import FastAPI, UploadFile, File
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 import os
 import shutil
 import uuid
+from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from supabase import create_client
+from dotenv import load_dotenv
+
+# Supabase 환경변수 로드 (.env 파일이 test 폴더에 있음)
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+ENV_PATH = os.path.join(CURRENT_DIR, "..", "..", "test", ".env")
+load_dotenv(dotenv_path=ENV_PATH)
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+else:
+    print("WARNING: Supabase URL or KEY not found in .env!")
+    supabase = None
 
 # yolo_inference.py에서 로직 가져오기
 from yolo_inference import analyze_video_with_yolo
@@ -38,6 +55,32 @@ class AnalyzeResponse(BaseModel):
     total_frames: int
     object_count: int
     records: list
+
+class UserAuth(BaseModel):
+    email: str
+    password: str
+
+@app.post("/api/signup")
+def signup(user: UserAuth):
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    try:
+        # Supabase Auth 회원가입
+        res = supabase.auth.sign_up({"email": user.email, "password": user.password})
+        return {"message": "회원가입이 완료되었습니다.", "user": res.user.email if res.user else user.email}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/login")
+def login(user: UserAuth):
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    try:
+        # Supabase Auth 로그인
+        res = supabase.auth.sign_in_with_password({"email": user.email, "password": user.password})
+        return {"message": "로그인 성공", "token": res.session.access_token, "user": res.user.email}
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="이메일 또는 비밀번호가 잘못되었습니다.")
 
 @app.post("/api/analyze", response_model=AnalyzeResponse)
 def analyze_video(file: UploadFile = File(...)):
