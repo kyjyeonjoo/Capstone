@@ -10,19 +10,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client
 from dotenv import load_dotenv
 
-# Supabase 환경변수 로드 (.env 파일이 test 폴더에 있음)
+# 환경변수 로드 (.env 파일이 backend 폴더에 있음)
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-ENV_PATH = os.path.join(CURRENT_DIR, "..", "..", "test", ".env")
+ENV_PATH = os.path.join(CURRENT_DIR, ".env")
 load_dotenv(dotenv_path=ENV_PATH)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 if SUPABASE_URL and SUPABASE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 else:
     print("WARNING: Supabase URL or KEY not found in .env!")
     supabase = None
+
+if not OPENROUTER_API_KEY:
+    print("WARNING: OPENROUTER_API_KEY not found in .env!")
 
 # yolo_inference.py에서 로직 가져오기
 from yolo_inference import analyze_video_with_yolo
@@ -58,6 +62,10 @@ class AnalyzeResponse(BaseModel):
     total_frames: int
     object_count: int
     records: list
+
+class ChatRequest(BaseModel):
+    user_question: str
+    accident_data: Optional[dict] = None
 
 class UserAuth(BaseModel):
     email: str
@@ -223,6 +231,60 @@ def analyze_video(file: UploadFile = File(...)):
         "object_count": len(result_dict["records"]),
         "records": result_dict["records"]
     }
+
+@app.post("/api/chat")
+def chat_with_ai(data: ChatRequest):
+    if not OPENROUTER_API_KEY:
+        raise HTTPException(status_code=500, detail="OpenRouter API key is missing.")
+    
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    # 구성할 시스템 프롬프트
+    system_prompt = (
+        "당신은 'AI 교통사고 법률 보조 시스템'의 전문 상담 챗봇입니다. "
+        "사용자가 제공한 블랙박스 영상 분석 결과를 바탕으로 사고 과실 비율을 추정하고, 관련 법률 및 대법원 판례를 근거로 전문적인 조언을 제공합니다. "
+        "친절하고 명확하게 답변하며, 분석된 결과가 있으면 이를 십분 활용하여 답변하세요."
+    )
+
+    if data.accident_data:
+        system_prompt += f"\n\n[영상 분석 결과 컨텍스트]\n{str(data.accident_data)}"
+    
+    models_to_try = [
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+    ]
+    
+    for model in models_to_try:
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": data.user_question}
+            ]
+        }
+        
+        try:
+            response = requests.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            res_data = response.json()
+            answer = res_data["choices"][0]["message"]["content"]
+            return {"answer": answer}
+        except requests.exceptions.HTTPError as e:
+            if response.status_code == 429:
+                print(f"[경고] {model} 모델 접속량 초과(429). 다음 무료 모델로 재시도합니다...")
+                continue
+            else:
+                print(f"OpenRouter API Error: {e}")
+                print(response.text)
+                raise HTTPException(status_code=500, detail="챗봇 응답을 가져오는 중 서버 오류가 발생했습니다.")
+        except Exception as e:
+            print(f"OpenRouter API Request Error: {e}")
+            raise HTTPException(status_code=500, detail="챗봇 API 통신 중 알 수 없는 오류가 발생했습니다.")
+            
+    raise HTTPException(status_code=429, detail="현재 전 세계적으로 무료 AI 모델 사용량이 많아 접속이 지연되고 있습니다. 잠시 후 다시 시도해주세요.")
 
 # 중요: 이 코드가 제일 마지막에 와야 합니다! (api 라우팅이 먼저 적용되어야 함)
 # 프론트엔드 폴더 전체를 정적으로 서빙 (마치 로컬 웹서버처럼 구동)

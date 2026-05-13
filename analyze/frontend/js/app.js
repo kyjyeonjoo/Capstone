@@ -467,6 +467,7 @@ document.addEventListener('DOMContentLoaded', () => {
             .then(res => res.json())
             .then(data => {
                 console.log('Analysis Result:', data);
+                window.currentAccidentData = data;
                 
                 // Populate objects view
                 document.getElementById('objTotalFrames').textContent = data.total_frames || 0;
@@ -523,4 +524,62 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Initial state execution
     updateUIState();
+
+    // --- Chat Logic ---
+    const chatInput = document.querySelector('.chat-input');
+    const sendBtn = document.querySelector('.send-btn');
+    const chatMessages = document.querySelector('.chat-messages');
+
+    if (chatInput && sendBtn && chatMessages) {
+        async function sendMessage() {
+            const message = chatInput.value.trim();
+            if (!message) return;
+
+            // Add user message to UI
+            const userMsgDiv = document.createElement('div');
+            userMsgDiv.className = 'message user';
+            userMsgDiv.textContent = message;
+            chatMessages.appendChild(userMsgDiv);
+            
+            chatInput.value = '';
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+
+            // Add loading indicator
+            const botMsgDiv = document.createElement('div');
+            botMsgDiv.className = 'message bot';
+            botMsgDiv.innerHTML = '<span class="loading-dots">답변을 생성 중입니다...</span>';
+            chatMessages.appendChild(botMsgDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+
+            try {
+                const accidentData = window.currentAccidentData || null;
+                const res = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        user_question: message,
+                        accident_data: accidentData
+                    })
+                });
+                const data = await res.json();
+
+                if (!res.ok) throw new Error(data.detail || '채팅 응답 에러');
+
+                // Update bot message with actual response
+                // Replace line breaks with <br> for simple formatting
+                botMsgDiv.innerHTML = data.answer.replace(/\n/g, '<br>');
+            } catch (err) {
+                botMsgDiv.innerHTML = `<span style="color: var(--danger);">[오류] ${err.message}</span>`;
+            } finally {
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            }
+        }
+
+        sendBtn.addEventListener('click', sendMessage);
+        chatInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+    }
 });
