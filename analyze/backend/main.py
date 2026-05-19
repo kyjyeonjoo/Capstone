@@ -5,7 +5,7 @@ import requests
 from typing import Optional, List
 from pydantic import BaseModel
 from fastapi.responses import JSONResponse
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Header
+from fastapi import FastAPI, UploadFile, File, HTTPException, Header, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client
@@ -52,6 +52,7 @@ WEIGHTS_PATHS = {
 TEMP_DIR = "temp_uploads"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
+
 # ──────────────────────────────────────────
 # 응답 모델
 # ──────────────────────────────────────────
@@ -76,6 +77,7 @@ class AnalyzeResponse(BaseModel):
 class ChatRequest(BaseModel):
     user_question: str
     accident_data: Optional[dict] = None
+    result_id: Optional[int] = None
 
 class UserAuth(BaseModel):
     email: str
@@ -164,6 +166,22 @@ def reset_password(data: ResetPassword):
 class ResetPasswordRequest(BaseModel):
     email: str
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+@app.post("/api/refresh-token")
+def refresh_token_endpoint(data: RefreshRequest):
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    try:
+        res = supabase.auth.refresh_session(data.refresh_token)
+        return {
+            "token": res.session.access_token,
+            "refresh_token": res.session.refresh_token,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="토큰 갱신 실패: " + str(e))
+
 
 # ──────────────────────────────────────────
 # 인증 API
@@ -182,12 +200,13 @@ def signup(user: UserAuth):
                     "nickname": user.nickname
                 }
             }
-            
+
         res = supabase.auth.sign_up({
-            "email": user.email, 
+            "email": user.email,
             "password": user.password,
             "options": options
         })
+
         return {"message": "회원가입이 완료되었습니다.", "user": res.user.email if res.user else user.email}
     except Exception as e:
         error_msg = str(e)
@@ -207,8 +226,9 @@ def login(user: UserAuth):
             nickname = res.user.user_metadata["nickname"]
             
         return {
-            "message": "로그인 성공", 
-            "token": res.session.access_token, 
+            "message": "로그인 성공",
+            "token": res.session.access_token,
+            "refresh_token": res.session.refresh_token,
             "user": res.user.email,
             "nickname": nickname
         }
@@ -369,17 +389,16 @@ def analyze_video(
     }
 
 @app.post("/api/chat")
-def chat_with_ai(data: ChatRequest):
+def chat_with_ai(data: ChatRequest, authorization: Optional[str] = Header(None)):
     if not OPENROUTER_API_KEY:
         raise HTTPException(status_code=500, detail="OpenRouter API key is missing.")
-    
+
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
     }
 
-    # 구성할 시스템 프롬프트
     system_prompt = (
         "당신은 'AI 교통사고 법률 보조 시스템'의 전문 상담 챗봇입니다. "
         "사용자가 제공한 블랙박스 영상 분석 결과를 바탕으로 사고 과실 비율을 추정하고, 관련 법률 및 대법원 판례를 근거로 전문적인 조언을 제공합니다. "
@@ -388,11 +407,11 @@ def chat_with_ai(data: ChatRequest):
 
     if data.accident_data:
         system_prompt += f"\n\n[영상 분석 결과 컨텍스트]\n{str(data.accident_data)}"
-    
+
     models_to_try = [
         "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
     ]
-    
+
     for model in models_to_try:
         payload = {
             "model": model,
@@ -401,12 +420,31 @@ def chat_with_ai(data: ChatRequest):
                 {"role": "user", "content": data.user_question}
             ]
         }
-        
+
         try:
             response = requests.post(url, headers=headers, json=payload)
             response.raise_for_status()
             res_data = response.json()
             answer = res_data["choices"][0]["message"]["content"]
+
+            # DB 저장
+            if supabase:
+                try:
+                    user_id = None
+                    if authorization:
+                        token = authorization.replace("Bearer ", "")
+                        user = supabase.auth.get_user(token)
+                        user_id = user.user.id if user and user.user else None
+
+                    supabase.table("chat_history").insert({
+                        "user_id":  user_id,
+                        "result_id": data.result_id,
+                        "question": data.user_question,
+                        "answer":   answer,
+                    }).execute()
+                except Exception as e:
+                    print(f"[DB] chat_history 저장 실패: {e}")
+
             return {"answer": answer}
         except requests.exceptions.HTTPError as e:
             if response.status_code == 429:
@@ -419,9 +457,10 @@ def chat_with_ai(data: ChatRequest):
         except Exception as e:
             print(f"OpenRouter API Request Error: {e}")
             raise HTTPException(status_code=500, detail="챗봇 API 통신 중 알 수 없는 오류가 발생했습니다.")
-            
+
     raise HTTPException(status_code=429, detail="현재 전 세계적으로 무료 AI 모델 사용량이 많아 접속이 지연되고 있습니다. 잠시 후 다시 시도해주세요.")
 
-# 프론트엔드 정적 서빙 (반드시 마지막)
+# 중요: 이 코드가 제일 마지막에 와야 합니다! (api 라우팅이 먼저 적용되어야 함)
+# 프론트엔드 폴더 전체를 정적으로 서빙 (마치 로컬 웹서버처럼 구동)
 FRONTEND_DIR = os.path.join(CURRENT_DIR, "..", "frontend")
 app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
