@@ -23,6 +23,40 @@ document.addEventListener('DOMContentLoaded', () => {
             toast.addEventListener('animationend', () => toast.remove());
         }, 3000);
     }
+    // --- Token Auto-Refresh ---
+    async function getValidToken() {
+        const token = localStorage.getItem('access_token');
+        const refreshToken = localStorage.getItem('refresh_token');
+        if (!token) return null;
+
+        try {
+            const payload = JSON.parse(atob(token.split('.')[1]));
+            const now = Math.floor(Date.now() / 1000);
+            if (payload.exp && payload.exp > now + 60) return token; // 아직 유효
+        } catch {
+            return token;
+        }
+
+        // 만료 임박 — refresh 시도
+        if (!refreshToken) return null;
+        try {
+            const res = await fetch('/api/refresh-token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ refresh_token: refreshToken })
+            });
+            if (!res.ok) throw new Error('refresh 실패');
+            const data = await res.json();
+            localStorage.setItem('access_token', data.token);
+            localStorage.setItem('refresh_token', data.refresh_token);
+            return data.token;
+        } catch {
+            localStorage.removeItem('access_token');
+            localStorage.removeItem('refresh_token');
+            return null;
+        }
+    }
+
     // --- State ---
     let isLoggedIn = false;
     let currentView = 'upload-view';
@@ -197,6 +231,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const data = await res.json();
                 if (!res.ok) throw new Error(data.detail || '로그인 실패');
                 localStorage.setItem('access_token', data.token);
+                localStorage.setItem('refresh_token', data.refresh_token);
                 localStorage.setItem('user_email', data.user);
                 if (data.nickname) {
                     localStorage.setItem('user_nickname', data.nickname);
@@ -315,6 +350,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (logoutBtn) {
         logoutBtn.addEventListener('click', () => {
             localStorage.removeItem('access_token');
+            localStorage.removeItem('refresh_token');
             localStorage.removeItem('user_email');
             localStorage.removeItem('user_nickname');
             isLoggedIn = false;
@@ -459,7 +495,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // 핵심: 분석 실행 + 결과 화면 반영
     // ──────────────────────────────────────────
     if (executeAnalysisBtn) {
-        executeAnalysisBtn.addEventListener('click', () => {
+        executeAnalysisBtn.addEventListener('click', async () => {
             if (!selectedFile) {
                 switchView('result-view');
                 return;
@@ -471,7 +507,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const formData = new FormData();
             formData.append('file', selectedFile);
 
-            const token = localStorage.getItem('access_token');
+            const token = await getValidToken();
             const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
 
             fetch('/api/analyze', { method: 'POST', headers, body: formData })
@@ -608,12 +644,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
             try {
                 const accidentData = window.currentAccidentData || null;
+                const token = await getValidToken();
+                const chatHeaders = { 'Content-Type': 'application/json' };
+                if (token) chatHeaders['Authorization'] = `Bearer ${token}`;
+
                 const res = await fetch('/api/chat', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: chatHeaders,
                     body: JSON.stringify({
                         user_question: message,
-                        accident_data: accidentData
+                        accident_data: accidentData,
+                        result_id: accidentData?.result_id || null
                     })
                 });
                 const data = await res.json();
@@ -622,7 +663,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 // Update bot message with actual response
                 // Replace line breaks with <br> for simple formatting
-                botMsgDiv.innerHTML = data.answer.replace(/\n/g, '<br>');
+                botMsgDiv.innerHTML = (data.answer || '응답을 받지 못했습니다.').replace(/\n/g, '<br>');
             } catch (err) {
                 botMsgDiv.innerHTML = `<span style="color: var(--danger);">[오류] ${err.message}</span>`;
             } finally {

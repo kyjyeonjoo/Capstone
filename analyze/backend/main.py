@@ -66,6 +66,7 @@ class AnalyzeResponse(BaseModel):
 class ChatRequest(BaseModel):
     user_question: str
     accident_data: Optional[dict] = None
+    result_id: Optional[int] = None
 
 class UserAuth(BaseModel):
     email: str
@@ -154,6 +155,22 @@ def reset_password(data: ResetPassword):
 class ResetPasswordRequest(BaseModel):
     email: str
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+@app.post("/api/refresh-token")
+def refresh_token_endpoint(data: RefreshRequest):
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    try:
+        res = supabase.auth.refresh_session(data.refresh_token)
+        return {
+            "token": res.session.access_token,
+            "refresh_token": res.session.refresh_token,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="토큰 갱신 실패: " + str(e))
+
 
 # ──────────────────────────────────────────
 # 인증 API
@@ -198,8 +215,9 @@ def login(user: UserAuth):
             nickname = res.user.user_metadata["nickname"]
             
         return {
-            "message": "로그인 성공", 
-            "token": res.session.access_token, 
+            "message": "로그인 성공",
+            "token": res.session.access_token,
+            "refresh_token": res.session.refresh_token,
             "user": res.user.email,
             "nickname": nickname
         }
@@ -360,7 +378,7 @@ def analyze_video(
     }
 
 @app.post("/api/chat")
-def chat_with_ai(data: ChatRequest):
+def chat_with_ai(data: ChatRequest, authorization: Optional[str] = Header(None)):
     if not OPENROUTER_API_KEY:
         raise HTTPException(status_code=500, detail="OpenRouter API key is missing.")
 
@@ -397,6 +415,25 @@ def chat_with_ai(data: ChatRequest):
             response.raise_for_status()
             res_data = response.json()
             answer = res_data["choices"][0]["message"]["content"]
+
+            # DB 저장
+            if supabase:
+                try:
+                    user_id = None
+                    if authorization:
+                        token = authorization.replace("Bearer ", "")
+                        user = supabase.auth.get_user(token)
+                        user_id = user.user.id if user and user.user else None
+
+                    supabase.table("chat_history").insert({
+                        "user_id":  user_id,
+                        "result_id": data.result_id,
+                        "question": data.user_question,
+                        "answer":   answer,
+                    }).execute()
+                except Exception as e:
+                    print(f"[DB] chat_history 저장 실패: {e}")
+
             return {"answer": answer}
         except requests.exceptions.HTTPError as e:
             if response.status_code == 429:
