@@ -248,11 +248,15 @@
                         <label>이메일</label>
                         <input type="email" id="loginEmail" class="input-control" placeholder="user@example.com" required>
                     </div>
-                    <div class="input-group">
+                    <div class="input-group" style="margin-bottom: 0.5rem;">
                         <label>비밀번호</label>
                         <input type="password" id="loginPassword" class="input-control" placeholder="••••••••" required>
                     </div>
-                    <button type="submit" class="btn btn-primary btn-block" style="margin-top: 1rem;">로그인</button>
+                    <div class="form-link-wrapper">
+                        <button type="button" id="showResetFormBtn" class="form-link">비밀번호를 잊으셨나요?</button>
+                    </div>
+                    <div id="loginMsg" class="msg-text"></div>
+                    <button type="submit" class="btn btn-primary btn-block" style="margin-top: 0.5rem;">로그인</button>
                 </form>
             </div>
             
@@ -263,14 +267,35 @@
                         <label>이메일</label>
                         <div class="inline-input">
                             <input type="email" id="signupEmail" class="input-control" placeholder="user@example.com" required>
-                            <button type="button" class="btn btn-secondary">중복확인</button>
+                            <button type="button" id="checkDupBtn" class="btn btn-secondary">중복확인</button>
                         </div>
                     </div>
+                    <div id="emailDupMsg" class="msg-text"></div>
                     <div class="input-group">
                         <label>비밀번호</label>
                         <input type="password" id="signupPassword" class="input-control" placeholder="새 비밀번호 입력" required>
                     </div>
-                    <button type="submit" class="btn btn-primary btn-block" style="margin-top: 1rem;">회원가입</button>
+                    <div id="signupMsg" class="msg-text"></div>
+                    <button type="submit" class="btn btn-primary btn-block" style="margin-top: 0.5rem;">회원가입</button>
+                </form>
+            </div>
+
+            <!-- Password Reset Form (Hidden initially, no tab) -->
+            <div id="resetPasswordFormView" class="form-view">
+                <div style="text-align: center; margin-bottom: 1.5rem;">
+                    <h3 style="margin-bottom: 0.5rem;">비밀번호 찾기</h3>
+                    <p style="font-size: 0.85rem; color: var(--text-secondary);">가입하신 이메일을 입력하시면 비밀번호 재설정 링크를 보내드립니다.</p>
+                </div>
+                <form id="resetPasswordForm">
+                    <div class="input-group">
+                        <label>이메일</label>
+                        <input type="email" id="resetEmail" class="input-control" placeholder="user@example.com" required>
+                    </div>
+                    <div id="resetMsg" class="msg-text"></div>
+                    <button type="submit" class="btn btn-primary btn-block" style="margin-top: 0.5rem;">재설정 링크 보내기</button>
+                    <div style="text-align: center; margin-top: 1rem;">
+                        <button type="button" id="backToLoginBtn" class="form-link">로그인 화면으로 돌아가기</button>
+                    </div>
                 </form>
             </div>
         </div>
