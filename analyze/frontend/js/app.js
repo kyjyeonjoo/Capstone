@@ -31,6 +31,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const navTabs = document.querySelectorAll('.nav-tab');
     const views = document.querySelectorAll('.view');
     const loginBtnNode = document.getElementById('loginBtn');
+    const userProfileNode = document.getElementById('userProfile');
     const userPopover = document.getElementById('userPopover');
     const authModal = document.getElementById('authModal');
     const closeModalBtn = document.querySelector('.close-modal'); // Only selects the first one
