@@ -25,41 +25,35 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     // --- State ---
     let isLoggedIn = false;
-    let currentView = 'upload-view'; // 'upload-view', 'result-view', 'chat-view'
-    
+    let currentView = 'upload-view';
+
     // --- Elements ---
     const navTabs = document.querySelectorAll('.nav-tab');
     const views = document.querySelectorAll('.view');
     const loginBtnNode = document.getElementById('loginBtn');
-    const userProfileNode = document.getElementById('userProfile');
     const userPopover = document.getElementById('userPopover');
+    const authModal = document.getElementById('authModal');
     const closeModalBtn = document.querySelector('.close-modal'); // Only selects the first one
     const profileModal = document.getElementById('profileModal');
     const profileMenuBtn = document.getElementById('profileMenuBtn');
-    
     const modalTabs = document.querySelectorAll('.modal-tab');
     const formViews = document.querySelectorAll('.form-view');
     const executeAnalysisBtn = document.getElementById('executeAnalysisBtn');
-    
+
     // --- Navigation ---
     navTabs.forEach(tab => {
         tab.addEventListener('click', (e) => {
             const targetView = tab.getAttribute('data-target');
-            
-            // 로그인 권한 제어 (채팅만)
             if (targetView === 'chat-view' && !isLoggedIn) {
                 authModal.classList.add('active');
                 return;
             }
-            
-            // UI Update
             navTabs.forEach(t => t.classList.remove('active'));
             tab.classList.add('active');
-            
             switchView(targetView);
         });
     });
-    
+
     function switchView(viewId) {
         currentView = viewId;
         views.forEach(v => v.classList.remove('active'));
@@ -67,39 +61,50 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // --- Authentication ---
-    if(loginBtnNode) {
-        loginBtnNode.addEventListener('click', () => {
-            authModal.classList.add('active');
-        });
+    if (loginBtnNode) loginBtnNode.addEventListener('click', () => authModal.classList.add('active'));
+    if (closeModalBtn) closeModalBtn.addEventListener('click', () => authModal.classList.remove('active'));
+
+    function showMessage(elementId, text, isError = true) {
+        const el = document.getElementById(elementId);
+        if (!el) return;
+        el.textContent = text;
+        el.className = 'msg-text ' + (isError ? 'error' : 'success');
     }
 
-    if(closeModalBtn) {
-        // Find all close buttons inside modals
-        document.querySelectorAll('.close-modal').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                e.target.closest('.modal-overlay').classList.remove('active');
+    function clearMessage(elementId) {
+        const el = document.getElementById(elementId);
+        if (el) { el.className = 'msg-text'; el.textContent = ''; }
+    }
+
+    const resetPasswordFormView = document.getElementById('resetPasswordFormView');
+    if (modalTabs.length > 0) {
+        modalTabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                modalTabs.forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                const targetId = tab.getAttribute('data-target');
+                formViews.forEach(view => view.classList.remove('active'));
+                document.getElementById(targetId).classList.add('active');
+                clearMessage('loginMsg');
+                clearMessage('signupMsg');
+                clearMessage('emailDupMsg');
+                clearMessage('resetMsg');
             });
         });
     }
 
-    // Modal tabs toggle (Login/Signup)
-    modalTabs.forEach(tab => {
-        tab.addEventListener('click', () => {
-            const target = tab.getAttribute('data-target');
-            modalTabs.forEach(t => t.classList.remove('active'));
-            tab.classList.add('active');
-            
-            formViews.forEach(f => f.classList.remove('active'));
-            document.getElementById(target).classList.add('active');
-        });
-    });
-
-    const resultViewBtn = document.getElementById('resultViewBtn');
-    if (resultViewBtn) {
-        resultViewBtn.addEventListener('click', (e) => {
-            switchView(resultViewBtn.getAttribute('data-target'));
+    if (closeModalBtn) {
+        // Find all close buttons inside modals
+        document.querySelectorAll('.close-modal').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const overlay = e.target.closest('.modal-overlay');
+                if (overlay) overlay.classList.remove('active');
+            });
         });
     }
+
+    const resultViewBtn = document.getElementById('resultViewBtn');
+    if (resultViewBtn) resultViewBtn.addEventListener('click', () => switchView(resultViewBtn.getAttribute('data-target')));
 
     const backToObjectsBtn = document.getElementById('backToObjectsBtn');
     if (backToObjectsBtn) {
@@ -155,27 +160,21 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // --- Real Authentication (Supabase) ---
-    const realLoginForm = document.getElementById('realLoginForm');
-    const realSignupForm = document.getElementById('realSignupForm');
-    
-    // 페이지 로드 시 기존 로그인 유지
+    // --- Auth Forms ---
     const savedToken = localStorage.getItem('access_token');
     const savedUser = localStorage.getItem('user_email');
-    if (savedToken && savedUser) {
-        isLoggedIn = true;
-    }
+    if (savedToken && savedUser) isLoggedIn = true;
 
+    const realLoginForm = document.getElementById('realLoginForm');
     if (realLoginForm) {
         realLoginForm.addEventListener('submit', async (e) => {
             e.preventDefault();
             const email = document.getElementById('loginEmail').value;
             const password = document.getElementById('loginPassword').value;
             const submitBtn = realLoginForm.querySelector('button[type="submit"]');
-            
-            submitBtn.textContent = '로그인 중...';
+            clearMessage('loginMsg');
+            submitBtn.textContent = '로그인 중..';
             submitBtn.disabled = true;
-
             try {
                 const res = await fetch('/api/login', {
                     method: 'POST',
@@ -183,18 +182,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     body: JSON.stringify({ email, password })
                 });
                 const data = await res.json();
-                
                 if (!res.ok) throw new Error(data.detail || '로그인 실패');
-                
-                // 로그인 성공
                 localStorage.setItem('access_token', data.token);
                 localStorage.setItem('user_email', data.user);
                 if (data.nickname) {
                     localStorage.setItem('user_nickname', data.nickname);
                 }
                 isLoggedIn = true;
-                
-                // alert removed
                 authModal.classList.remove('active');
                 updateUIState();
             } catch (err) {
@@ -246,6 +240,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    const realSignupForm = document.getElementById('realSignupForm');
     if (realSignupForm) {
         realSignupForm.addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -253,10 +248,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const nickname = document.getElementById('signupNickname').value;
             const password = document.getElementById('signupPassword').value;
             const submitBtn = realSignupForm.querySelector('button[type="submit"]');
-            
-            submitBtn.textContent = '처리 중...';
+            clearMessage('signupMsg');
+            submitBtn.textContent = '처리 중..';
             submitBtn.disabled = true;
-
             try {
                 const res = await fetch('/api/signup', {
                     method: 'POST',
@@ -264,9 +258,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     body: JSON.stringify({ email, password, nickname })
                 });
                 const data = await res.json();
-                
                 if (!res.ok) throw new Error(data.detail || '회원가입 실패');
-                
                 showToast('회원가입이 완료되었습니다!', 'success');
                 // 탭 전환 (회원가입 -> 로그인)
                 document.querySelector('.modal-tab[data-target="loginFormView"]').click();
@@ -279,9 +271,36 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Logout
+    const resetPasswordForm = document.getElementById('resetPasswordForm');
+    if (resetPasswordForm) {
+        resetPasswordForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const email = document.getElementById('resetEmail').value;
+            const submitBtn = resetPasswordForm.querySelector('button[type="submit"]');
+            clearMessage('resetMsg');
+            submitBtn.textContent = '전송 중..';
+            submitBtn.disabled = true;
+            try {
+                const res = await fetch('/api/reset-password', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email })
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.detail || '발송 실패');
+                showMessage('resetMsg', '비밀번호 재설정 링크가 발송되었습니다.', false);
+                document.getElementById('resetEmail').value = '';
+            } catch (err) {
+                showMessage('resetMsg', err.message, true);
+            } finally {
+                submitBtn.textContent = '재설정 링크 발송하기';
+                submitBtn.disabled = false;
+            }
+        });
+    }
+
     const logoutBtn = document.getElementById('logoutBtn');
-    if(logoutBtn) {
+    if (logoutBtn) {
         logoutBtn.addEventListener('click', () => {
             localStorage.removeItem('access_token');
             localStorage.removeItem('user_email');
@@ -293,38 +312,27 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function updateUIState() {
-        if(isLoggedIn) {
+        if (isLoggedIn) {
             const currentUser = localStorage.getItem('user_nickname') || localStorage.getItem('user_email') || '사용자';
             loginBtnNode.style.display = 'none';
             userProfileNode.style.display = 'flex';
-            // 표시 이름 업데이트
             userProfileNode.querySelector('span').textContent = currentUser;
-            // Show history items in sidebar
-            document.querySelectorAll('.history-item').forEach(el => {
-                el.style.display = 'flex';
-            });
+            document.querySelectorAll('.history-item').forEach(el => el.style.display = 'flex');
         } else {
             loginBtnNode.style.display = 'block';
             userProfileNode.style.display = 'none';
-            // Hide history items
-            document.querySelectorAll('.history-item').forEach(el => {
-                el.style.display = 'none';
-            });
+            document.querySelectorAll('.history-item').forEach(el => el.style.display = 'none');
             switchView('upload-view');
         }
     }
 
-    // User Popover Toggle
-    if(userProfileNode) {
+    if (userProfileNode) {
         userProfileNode.addEventListener('click', (e) => {
             e.stopPropagation();
             userPopover.classList.toggle('show');
         });
-        
         document.addEventListener('click', () => {
-            if(userPopover.classList.contains('show')) {
-                userPopover.classList.remove('show');
-            }
+            if (userPopover.classList.contains('show')) userPopover.classList.remove('show');
         });
     }
 
@@ -409,34 +417,26 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // --- Actions ---
-    // Drag and Drop Effects & File Input
+    // --- 파일 드롭존 ---
     const dropzone = document.getElementById('dropzone');
     const videoUpload = document.getElementById('videoUpload');
     let selectedFile = null;
 
-    if(dropzone && videoUpload) {
+    if (dropzone && videoUpload) {
         dropzone.addEventListener('click', () => videoUpload.click());
-        
         videoUpload.addEventListener('change', (e) => {
-            if(e.target.files.length > 0) {
+            if (e.target.files.length > 0) {
                 selectedFile = e.target.files[0];
-                dropzone.querySelector('h3').textContent = '영상 파일 선택됨';
+                dropzone.querySelector('h3').textContent = '영상 파일 드롭됨';
                 dropzone.querySelector('p').textContent = selectedFile.name;
             }
         });
-
-        dropzone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            dropzone.classList.add('dragover');
-        });
-        dropzone.addEventListener('dragleave', () => {
-            dropzone.classList.remove('dragover');
-        });
+        dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
+        dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
         dropzone.addEventListener('drop', (e) => {
             e.preventDefault();
             dropzone.classList.remove('dragover');
-            if(e.dataTransfer.files.length > 0) {
+            if (e.dataTransfer.files.length > 0) {
                 selectedFile = e.dataTransfer.files[0];
                 dropzone.querySelector('h3').textContent = '영상 파일 드롭됨';
                 dropzone.querySelector('p').textContent = selectedFile.name;
@@ -444,24 +444,28 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Analysis Execution (Mock moving to Result screen)
-    // Analysis Execution API 연결
-    if(executeAnalysisBtn) {
+    // ──────────────────────────────────────────
+    // 핵심: 분석 실행 + 결과 화면 반영
+    // ──────────────────────────────────────────
+    if (executeAnalysisBtn) {
         executeAnalysisBtn.addEventListener('click', () => {
-            // 파일을 선택하지 않았더라도 UI 시연을 위해 결과화면으로 넘어갈 수 있도록 처리 (원한다면 에러 표시 가능)
             if (!selectedFile) {
                 switchView('result-view');
                 return;
             }
 
-            executeAnalysisBtn.innerHTML = '🔄 영상 분석 중...';
+            executeAnalysisBtn.innerHTML = '⏳ 영상 분석 중..';
             executeAnalysisBtn.disabled = true;
 
             const formData = new FormData();
             formData.append('file', selectedFile);
 
+            const token = localStorage.getItem('access_token');
+            const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+
             fetch('/api/analyze', {
                 method: 'POST',
+                headers,
                 body: formData
             })
             .then(res => res.json())
@@ -469,7 +473,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 console.log('Analysis Result:', data);
                 window.currentAccidentData = data;
                 
-                // Populate objects view
+                // ① objects-view 채우기
                 document.getElementById('objTotalFrames').textContent = data.total_frames || 0;
                 document.getElementById('objTotalCount').textContent = data.object_count || (data.records ? data.records.length : 0);
                 
@@ -490,11 +494,68 @@ document.addEventListener('DOMContentLoaded', () => {
                     tableBody.innerHTML = `<tr><td colspan="3" style="padding: 1rem; text-align: center; color: var(--text-secondary);">탐지된 객체가 없습니다.</td></tr>`;
                 }
 
+                // ② result-view 과실비율 반영
+                const faultA = data.fault_ratio_a ?? 50;
+                const faultB = data.fault_ratio_b ?? 50;
+
+                // 숫자 업데이트
+                const ratioCircles = document.querySelectorAll('.ratio-value');
+                if (ratioCircles.length >= 2) {
+                    ratioCircles[0].textContent = faultA;
+                    ratioCircles[1].textContent = faultB;
+                }
+
+                // 원형 게이지 비율 + 색상 동시 업데이트
+                const circleAEl = document.querySelector('.ratio-circle.a');
+                const circleBEl = document.querySelector('.ratio-circle.b');
+
+                if (circleAEl && circleBEl) {
+                    let colorA = faultA >= 70 ? '#ef4444' : faultA >= 40 ? '#f97316' : '#22c55e';
+                    let colorB = faultB >= 70 ? '#ef4444' : faultB >= 40 ? '#f97316' : '#22c55e';
+
+                    circleAEl.style.background = `conic-gradient(${colorA} ${faultA}%, #f1f5f9 0)`;
+                    circleBEl.style.background = `conic-gradient(${colorB} ${faultB}%, #f1f5f9 0)`;
+                }
+
+                // 판단 근거 업데이트
+                const judgmentCard = document.querySelector('#result-view .law-content');
+                if (judgmentCard && data.situation_summary) {
+                    judgmentCard.innerHTML = `
+                        <p>${data.situation_summary}</p>
+                        <p>${data.accident_cause || ''}</p>
+                        <ul>
+                            <li><strong>감지된 위반:</strong> ${(data.detected_events || []).join(', ') || '없음'}</li>
+                            <li><strong>사고 유형:</strong> ${data.accident_type_name || '불명확'}</li>
+                            <li><strong>신뢰도:</strong> ${data.confidence_level || '-'}</li>
+                        </ul>
+                    `;
+                }
+
+                // 법률 정보 업데이트
+                const lawCard = document.querySelector('#result-view .full-width .law-content');
+                if (lawCard) {
+                    let html = `<p><strong>[적용 법조문]</strong></p><p>${data.legal_basis || ''}</p>`;
+
+                    if (data.case_laws && data.case_laws.length > 0) {
+                        data.case_laws.forEach(c => {
+                            html += `
+                                <hr style="border:0; border-top:1px solid #e2e8f0; margin:1rem 0;">
+                                <p><strong>[관련 판례] ${c.case_title || ''}</strong></p>
+                                <p>법원: ${c.court_name || ''} | 선고일: ${c.decision_date || ''}</p>
+                                <p>${c.summary || '판례 요약 없음'}</p>
+                                ${c.fault_ratio ? `<p>과실비율: ${c.fault_ratio}</p>` : ''}
+                            `;
+                        });
+                    } else {
+                        html += `<p style="color:var(--text-secondary); margin-top:1rem;">관련 판례가 없습니다.</p>`;
+                    }
+                    lawCard.innerHTML = html;
+                }
+
                 switchView('objects-view');
             })
             .catch(err => {
                 console.error('Error:', err);
-                // 가상 데이터 제거 - 서버 통신 실패 시 안내 메시지만 출력
                 document.getElementById('objTotalFrames').textContent = 0;
                 document.getElementById('objTotalCount').textContent = 0;
                 document.getElementById('objRecordsTable').innerHTML = `<tr><td colspan="3" style="padding: 1rem; text-align: center; color: var(--text-secondary);">데이터가 없습니다. (API 통신 실패)</td></tr>`;
@@ -503,26 +564,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 switchView('objects-view'); 
             })
             .finally(() => {
-                executeAnalysisBtn.innerHTML = '✨ 영상 분석 실행 버튼';
+                executeAnalysisBtn.innerHTML = '🎬 영상 분석 실행 버튼';
                 executeAnalysisBtn.disabled = false;
             });
         });
     }
-    
-    // Selecting History Item (Mock Result switch)
+
+    // 히스토리 아이템 클릭
     const historyItems = document.querySelectorAll('.history-item');
     historyItems.forEach(item => {
         item.addEventListener('click', (e) => {
-            // Prevent if action buttons clicked
-            if(e.target.closest('.action-btn')) return;
-            
+            if (e.target.closest('.action-btn')) return;
             historyItems.forEach(h => h.classList.remove('active'));
             item.classList.add('active');
             switchView('result-view');
         });
     });
 
-    // Initial state execution
     updateUIState();
 
     // --- Chat Logic ---
