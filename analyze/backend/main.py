@@ -2,9 +2,10 @@ import os
 import shutil
 import uuid
 import requests
+from typing import Optional, List
 from pydantic import BaseModel
 from fastapi.responses import JSONResponse
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException, Header, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client
@@ -22,7 +23,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 if SUPABASE_URL and SUPABASE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 else:
-    print("WARNING: Supabase URL or KEY not found in .env!")
+    print("WARNING: Supabase URL or KEY not found!")
     supabase = None
 
 if not OPENROUTER_API_KEY:
@@ -30,10 +31,9 @@ if not OPENROUTER_API_KEY:
 
 # yolo_inference.py에서 로직 가져오기
 from yolo_inference import analyze_video_with_yolo
+from fault_analyzer import analyze_fault
 
 app = FastAPI()
-
-# CORS 허용 (로컬 구동용)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -41,24 +41,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# YOLO 4종 모델 경로 딕셔너리 (프로젝트 내부 동적 상대 경로)
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(CURRENT_DIR, "..", "models")
-
 WEIGHTS_PATHS = {
-    "신호": os.path.join(MODEL_DIR, "model_객체탐지_신호위반.pt"),
+    "신호":  os.path.join(MODEL_DIR, "model_객체탐지_신호위반.pt"),
     "안전모": os.path.join(MODEL_DIR, "model_객체탐지_안전모.pt"),
-    "중앙": os.path.join(MODEL_DIR, "model_객체탐지_중앙선침범.pt"),
-    "진로": os.path.join(MODEL_DIR, "model_객체탐지_진로변경.pt")
+    "중앙":  os.path.join(MODEL_DIR, "model_객체탐지_중앙선침범.pt"),
+    "진로":  os.path.join(MODEL_DIR, "model_객체탐지_진로변경.pt"),
 }
 
-# 업로드된 영상을 임시 다운받을 폴더
 TEMP_DIR = "temp_uploads"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-from typing import Optional
+
+# ──────────────────────────────────────────
+# 응답 모델
+# ──────────────────────────────────────────
 
 class AnalyzeResponse(BaseModel):
+    # YOLO
     total_frames: int
     object_count: int
     records: list
@@ -151,6 +151,14 @@ def reset_password(data: ResetPassword):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+class ResetPasswordRequest(BaseModel):
+    email: str
+
+
+# ──────────────────────────────────────────
+# 인증 API
+# ──────────────────────────────────────────
+
 @app.post("/api/signup")
 def signup(user: UserAuth):
     if not supabase:
@@ -164,13 +172,13 @@ def signup(user: UserAuth):
                     "nickname": user.nickname
                 }
             }
-            
+
         res = supabase.auth.sign_up({
-            "email": user.email, 
+            "email": user.email,
             "password": user.password,
             "options": options
         })
-        
+
         return {"message": "회원가입이 완료되었습니다.", "user": res.user.email if res.user else user.email}
     except Exception as e:
         error_msg = str(e)
@@ -183,7 +191,6 @@ def login(user: UserAuth):
     if not supabase:
         raise HTTPException(status_code=500, detail="Supabase not configured")
     try:
-        # Supabase Auth 로그인
         res = supabase.auth.sign_in_with_password({"email": user.email, "password": user.password})
         
         nickname = "사용자"
@@ -199,51 +206,170 @@ def login(user: UserAuth):
     except Exception as e:
         raise HTTPException(status_code=401, detail="이메일 또는 비밀번호가 잘못되었습니다.")
 
-@app.post("/api/analyze", response_model=AnalyzeResponse)
-def analyze_video(file: UploadFile = File(...)):
-    print(f"[{file.filename}] 영상을 서버로 업로드 받는 중...")
-    
-    # 임시 파일로 저장
-    temp_video_path = os.path.join(TEMP_DIR, f"{uuid.uuid4()}_{file.filename}")
-    with open(temp_video_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-        
-    print("저장 완료. YOLOv5 분석을 🚀 시작합니다!")
-    
-    # 딥러닝 추론 (시간이 꽤 걸리므로 콘솔에 로그가 찍힘)
-    # video_id를 파일 이름 기반으로 자동 생성
-    video_id_str = f"VID_{file.filename.split('.')[0].upper()[:5]}"
-    
+@app.post("/api/reset-password")
+def reset_password(req: ResetPasswordRequest):
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
     try:
-        result_dict = analyze_video_with_yolo(temp_video_path, WEIGHTS_PATHS, video_id=video_id_str)
+        supabase.auth.reset_password_email(req.email)
+        return {"message": "비밀번호 재설정 링크가 발송되었습니다."}
     except Exception as e:
-        print("분석 중 오류 발생:", e)
-        return {"total_frames": 0, "object_count": 0, "records": []}
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ──────────────────────────────────────────
+# 분석 이력 조회 API
+# ──────────────────────────────────────────
+
+@app.get("/api/results")
+def get_results(authorization: Optional[str] = Header(None)):
+    """로그인 사용자의 분석 이력 목록 반환."""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    try:
+        token   = (authorization or "").replace("Bearer ", "")
+        user    = supabase.auth.get_user(token)
+        user_id = user.user.id if user and user.user else None
+
+        res = (supabase.table("analysis_result")
+               .select("""
+                   result_id, fault_a, fault_b, summary, created_at,
+                   video_record!inner(video_id, original_name, upload_time, user_id),
+                   accident_type(accident_name)
+               """)
+               .order("created_at", desc=True)
+               .limit(20)
+               .execute())
+        return {"results": res.data}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/results/{result_id}")
+def get_result_detail(result_id: int):
+    """특정 분석 결과 상세 조회."""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    try:
+        res = (supabase.table("analysis_result")
+               .select("*, accident_type(*), video_record(*)")
+               .eq("result_id", result_id)
+               .single()
+               .execute())
+        return res.data
+    except Exception:
+        raise HTTPException(status_code=404, detail="결과를 찾을 수 없습니다.")
+
+
+# ──────────────────────────────────────────
+# 핵심: 영상 분석 + 과실비율 판단
+# ──────────────────────────────────────────
+
+@app.post("/api/analyze")
+def analyze_video(
+    file: UploadFile = File(...),
+    authorization: Optional[str] = Header(None),
+):
+    print(f"[{file.filename}] 영상 수신 중...")
+
+    # 임시 저장
+    temp_path = os.path.join(TEMP_DIR, f"{uuid.uuid4()}_{file.filename}")
+    with open(temp_path, "wb") as buf:
+        shutil.copyfileobj(file.file, buf)
+
+    # 로그인 사용자 확인
+    user_id = None
+    if authorization and supabase:
+        try:
+            token   = authorization.replace("Bearer ", "")
+            user    = supabase.auth.get_user(token)
+            user_id = user.user.id if user and user.user else None
+        except Exception:
+            pass
+
+    # video_record 먼저 INSERT → video_id 확보
+    video_id = None
+    if supabase:
+        try:
+            vr_res = supabase.table("video_record").insert({
+                "user_id":       user_id,
+                "original_name": file.filename,
+                "file_path":     temp_path,
+                "status":        "분석중",
+            }).execute()
+            video_id = vr_res.data[0]["video_id"] if vr_res.data else None
+            print(f"[DB] video_record 생성 완료 (video_id={video_id})")
+        except Exception as e:
+            print(f"[DB] video_record 생성 실패: {e}")
+
+    try:
+        # ① YOLO 분석
+        yolo_result = analyze_video_with_yolo(
+            temp_path, WEIGHTS_PATHS,
+            video_id=f"VID_{file.filename.split('.')[0].upper()[:5]}"
+        )
+
+        # duration 업데이트
+        if supabase and video_id:
+            supabase.table("video_record").update({
+                "duration": yolo_result["total_frames"] / 5.0,
+                "status":   "판단중",
+            }).eq("video_id", video_id).execute()
+
+        # ② 과실비율 판단
+        print("🤖 과실비율 판단 시작...")
+        fault_result = analyze_fault(
+            video_id     = video_id or -1,
+            total_frames = yolo_result["total_frames"],
+            records      = yolo_result["records"],
+        )
+
+        # 완료 상태 업데이트
+        if supabase and video_id:
+            supabase.table("video_record").update({"status": "완료"}).eq("video_id", video_id).execute()
+
+        print("✅ 전체 분석 완료!")
+
+    except Exception as e:
+        print(f"분석 오류: {e}")
+        if supabase and video_id:
+            supabase.table("video_record").update({"status": "실패"}).eq("video_id", video_id).execute()
+        return {
+            "total_frames": 0, "object_count": 0, "records": [],
+            "situation_summary": f"분석 중 오류: {e}",
+            "confidence_level": "낮음",
+        }
     finally:
-        # 하드디스크 낭비 방지를 위해 임시 영상 파일 즉시 삭제
-        if os.path.exists(temp_video_path):
-            os.remove(temp_video_path)
-    
-    print("✅ 영상 분석 및 DB 추출 완료! 프론트엔드로 전송합니다.")
-    
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
     return {
-        "total_frames": result_dict["total_frames"],
-        "object_count": len(result_dict["records"]),
-        "records": result_dict["records"]
+        "total_frames":      yolo_result["total_frames"],
+        "object_count":      len(yolo_result["records"]),
+        "records":           yolo_result["records"],
+        "situation_summary": fault_result.get("situation_summary"),
+        "fault_ratio_a":     fault_result.get("fault_ratio_a"),
+        "fault_ratio_b":     fault_result.get("fault_ratio_b"),
+        "accident_cause":    fault_result.get("accident_cause"),
+        "legal_basis":       fault_result.get("legal_basis"),
+        "confidence_level":  fault_result.get("confidence_level"),
+        "detected_events":   fault_result.get("detected_events", []),
+        "accident_type_name": fault_result.get("accident_type_name"),
+        "result_id":         fault_result.get("result_id"),
+        "case_laws":         fault_result.get("case_laws", []),
     }
 
 @app.post("/api/chat")
 def chat_with_ai(data: ChatRequest):
     if not OPENROUTER_API_KEY:
         raise HTTPException(status_code=500, detail="OpenRouter API key is missing.")
-    
+
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
     }
 
-    # 구성할 시스템 프롬프트
     system_prompt = (
         "당신은 'AI 교통사고 법률 보조 시스템'의 전문 상담 챗봇입니다. "
         "사용자가 제공한 블랙박스 영상 분석 결과를 바탕으로 사고 과실 비율을 추정하고, 관련 법률 및 대법원 판례를 근거로 전문적인 조언을 제공합니다. "
@@ -252,11 +378,11 @@ def chat_with_ai(data: ChatRequest):
 
     if data.accident_data:
         system_prompt += f"\n\n[영상 분석 결과 컨텍스트]\n{str(data.accident_data)}"
-    
+
     models_to_try = [
         "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
     ]
-    
+
     for model in models_to_try:
         payload = {
             "model": model,
@@ -265,7 +391,7 @@ def chat_with_ai(data: ChatRequest):
                 {"role": "user", "content": data.user_question}
             ]
         }
-        
+
         try:
             response = requests.post(url, headers=headers, json=payload)
             response.raise_for_status()
@@ -283,7 +409,7 @@ def chat_with_ai(data: ChatRequest):
         except Exception as e:
             print(f"OpenRouter API Request Error: {e}")
             raise HTTPException(status_code=500, detail="챗봇 API 통신 중 알 수 없는 오류가 발생했습니다.")
-            
+
     raise HTTPException(status_code=429, detail="현재 전 세계적으로 무료 AI 모델 사용량이 많아 접속이 지연되고 있습니다. 잠시 후 다시 시도해주세요.")
 
 # 중요: 이 코드가 제일 마지막에 와야 합니다! (api 라우팅이 먼저 적용되어야 함)
