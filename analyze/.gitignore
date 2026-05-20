@@ -11,5 +11,12 @@ __pycache__/
 backend/temp_uploads/
 temp_uploads/
 
+# 환경변수 (절대 커밋 금지 - Secret 키 포함)
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+
 # 기타 불필요 파일
 .DS_Store

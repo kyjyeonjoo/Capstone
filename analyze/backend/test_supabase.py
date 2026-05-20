@@ -56,6 +56,7 @@ tables = [
     "event",
     "video_record",
     "law",
+    "chat_history",
 ]
 
 print("\n[3] 테이블 접근 확인")

@@ -260,12 +260,16 @@ def get_results(authorization: Optional[str] = Header(None)):
         user    = supabase.auth.get_user(token)
         user_id = user.user.id if user and user.user else None
 
+        if not user_id:
+            return {"results": []}
+
         res = (supabase.table("analysis_result")
                .select("""
                    result_id, fault_a, fault_b, summary, created_at,
                    video_record!inner(video_id, original_name, upload_time, user_id),
                    accident_type(accident_name)
                """)
+               .eq("video_record.user_id", user_id)
                .order("created_at", desc=True)
                .limit(20)
                .execute())
@@ -280,13 +284,63 @@ def get_result_detail(result_id: int):
     if not supabase:
         raise HTTPException(status_code=500, detail="Supabase not configured")
     try:
+        # 1. analysis_result 조회
         res = (supabase.table("analysis_result")
                .select("*, accident_type(*), video_record(*)")
                .eq("result_id", result_id)
                .single()
                .execute())
-        return res.data
-    except Exception:
+        data = res.data
+        if not data:
+            raise HTTPException(status_code=404, detail="결과를 찾을 수 없습니다.")
+
+        video_id = data.get("video_id")
+        
+        # 2. 관련 event 조회 (감지된 위반 복원용)
+        detected_events = []
+        if video_id:
+            try:
+                event_res = supabase.table("event").select("event_type").eq("video_id", video_id).execute()
+                detected_events = [e["event_type"] for e in event_res.data] if event_res.data else []
+            except Exception as e:
+                print(f"[DB] event 조회 오류: {e}")
+
+        # 3. 관련 object_detection 조회 (YOLO 검출 테이블 복원용)
+        records = []
+        if video_id:
+            try:
+                det_res = supabase.table("object_detection").select("*").eq("video_id", video_id).execute()
+                for det in (det_res.data or []):
+                    records.append({
+                        "frame": int(det.get("timestamp", 0.0) * 5),
+                        "object_type": det.get("object_type"),
+                        "confidence": det.get("confidence")
+                    })
+            except Exception as e:
+                print(f"[DB] object_detection 조회 오류: {e}")
+
+        # 4. 관련 case_law 판례 조회
+        case_laws = []
+        accident_type_id = data.get("accident_type_id")
+        if accident_type_id:
+            try:
+                case_res = supabase.table("case_law").select(
+                    "case_title, case_number, court_name, decision_date, summary, fault_ratio"
+                ).eq("accident_type_id", accident_type_id).limit(3).execute()
+                case_laws = case_res.data or []
+            except Exception as e:
+                print(f"[DB] case_law 조회 오류: {e}")
+
+        # 5. 프론트엔드가 요구하는 포맷으로 필드 병합 및 바인딩
+        data["detected_events"] = detected_events
+        data["records"] = records
+        data["case_laws"] = case_laws
+        data["accident_type_name"] = data.get("accident_type", {}).get("accident_name") if data.get("accident_type") else "불명확"
+        data["confidence_level"] = "높음" if len(detected_events) > 0 else "보통"
+
+        return data
+    except Exception as e:
+        print(f"상세 조회 오류: {e}")
         raise HTTPException(status_code=404, detail="결과를 찾을 수 없습니다.")
 
 
@@ -393,6 +447,25 @@ def chat_with_ai(data: ChatRequest, authorization: Optional[str] = Header(None))
     if not OPENROUTER_API_KEY:
         raise HTTPException(status_code=500, detail="OpenRouter API key is missing.")
 
+    # ── 인증 필수화: 로그인하지 않은 사용자는 채팅 불가 ──
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
+
+    user_id = None
+    try:
+        token = authorization.replace("Bearer ", "")
+        user = supabase.auth.get_user(token)
+        user_id = user.user.id if user and user.user else None
+    except Exception as e:
+        print(f"[Auth] 토큰 확인 실패: {e}")
+        raise HTTPException(status_code=401, detail="유효하지 않은 인증 토큰입니다. 다시 로그인해주세요.")
+
+    if not user_id:
+        raise HTTPException(status_code=401, detail="인증된 사용자를 확인할 수 없습니다.")
+
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -412,13 +485,31 @@ def chat_with_ai(data: ChatRequest, authorization: Optional[str] = Header(None))
         "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
     ]
 
+    # 과거 대화 내용 불러오기 (result_id가 있을 때만 해당 분석의 이전 대화 로드)
+    history_messages = []
+    if data.result_id:
+        try:
+            hist_res = (supabase.table("chat_history")
+                        .select("question, answer")
+                        .eq("user_id", user_id)
+                        .eq("result_id", data.result_id)
+                        .order("created_at", desc=False)
+                        .execute())
+            for chat in (hist_res.data or []):
+                history_messages.append({"role": "user", "content": chat["question"]})
+                if chat.get("answer"):
+                    history_messages.append({"role": "assistant", "content": chat["answer"]})
+        except Exception as e:
+            print(f"[DB] 이전 대화 내역 조회 실패: {e}")
+
     for model in models_to_try:
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(history_messages)
+        messages.append({"role": "user", "content": data.user_question})
+
         payload = {
             "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": data.user_question}
-            ]
+            "messages": messages
         }
 
         try:
@@ -427,23 +518,25 @@ def chat_with_ai(data: ChatRequest, authorization: Optional[str] = Header(None))
             res_data = response.json()
             answer = res_data["choices"][0]["message"]["content"]
 
-            # DB 저장
-            if supabase:
-                try:
-                    user_id = None
-                    if authorization:
-                        token = authorization.replace("Bearer ", "")
-                        user = supabase.auth.get_user(token)
-                        user_id = user.user.id if user and user.user else None
+            # ── DB 저장: 로그인 사용자만 저장 (user_id 보장됨) ──
+            # result_id가 None이면 일반 채팅으로 저장 (영상 분석에 종속되지 않음)
+            try:
+                insert_payload = {
+                    "user_id":  user_id,
+                    "question": data.user_question,
+                    "answer":   answer,
+                }
+                if data.result_id is not None:
+                    insert_payload["result_id"] = data.result_id
 
-                    supabase.table("chat_history").insert({
-                        "user_id":  user_id,
-                        "result_id": data.result_id,
-                        "question": data.user_question,
-                        "answer":   answer,
-                    }).execute()
-                except Exception as e:
-                    print(f"[DB] chat_history 저장 실패: {e}")
+                save_res = supabase.table("chat_history").insert(insert_payload).execute()
+                if save_res.data:
+                    print(f"[DB] chat_history 저장 성공 (user_id={user_id}, result_id={data.result_id})")
+                else:
+                    print(f"[DB] chat_history 저장 응답 비어있음: {save_res}")
+            except Exception as e:
+                # 저장 실패는 사용자 응답에는 영향 안 주되, 로그는 명확하게
+                print(f"[DB] chat_history 저장 실패 (user_id={user_id}, result_id={data.result_id}): {e}")
 
             return {"answer": answer}
         except requests.exceptions.HTTPError as e:
@@ -458,7 +551,142 @@ def chat_with_ai(data: ChatRequest, authorization: Optional[str] = Header(None))
             print(f"OpenRouter API Request Error: {e}")
             raise HTTPException(status_code=500, detail="챗봇 API 통신 중 알 수 없는 오류가 발생했습니다.")
 
-    raise HTTPException(status_code=429, detail="현재 전 세계적으로 무료 AI 모델 사용량이 많아 접속이 지연되고 있습니다. 잠시 후 다시 시도해주세요.")
+
+@app.get("/api/chat/history")
+def get_chat_history(
+    result_id: Optional[int] = None,
+    authorization: Optional[str] = Header(None)
+):
+    """특정 분석 건 또는 사용자의 전체 과거 채팅 기록 반환."""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    try:
+        token = (authorization or "").replace("Bearer ", "")
+        user = supabase.auth.get_user(token)
+        user_id = user.user.id if user and user.user else None
+
+        if not user_id:
+            return {"history": []}
+
+        query = supabase.table("chat_history").select("*").eq("user_id", user_id)
+        if result_id is not None:
+            query = query.eq("result_id", result_id)
+            
+        res = query.order("created_at", desc=False).execute()
+        return {"history": res.data}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.delete("/api/results/{result_id}")
+def delete_result(result_id: int, authorization: Optional[str] = Header(None)):
+    """특정 분석 결과 및 연관 데이터(video_record 등) 삭제."""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    try:
+        token = (authorization or "").replace("Bearer ", "")
+        user = supabase.auth.get_user(token)
+        user_id = user.user.id if user and user.user else None
+        if not user_id:
+            raise HTTPException(status_code=401, detail="인증되지 않은 사용자입니다.")
+
+        # 1. 먼저 본인의 결과가 맞는지 확인하기 위해 조회
+        res = supabase.table("analysis_result").select("*, video_record(*)").eq("result_id", result_id).single().execute()
+        if not res.data:
+            raise HTTPException(status_code=404, detail="결과를 찾을 수 없습니다.")
+        
+        video_record = res.data.get("video_record")
+        if not video_record or video_record.get("user_id") != user_id:
+            raise HTTPException(status_code=403, detail="권한이 없습니다.")
+
+        video_id = video_record.get("video_id")
+
+        # 2. 관련 하위 데이터들 순차적으로 삭제 (외래키 무결성 예방을 위해 자식 테이블부터 삭제)
+        try:
+            # 2-1. chat_history 삭제 (채팅 내역) - 본인의 해당 분석에 묶인 채팅만
+            chat_del = (supabase.table("chat_history")
+                        .delete()
+                        .eq("result_id", result_id)
+                        .eq("user_id", user_id)
+                        .execute())
+            deleted_count = len(chat_del.data) if chat_del.data else 0
+            print(f"[Delete] chat_history {deleted_count}건 삭제 (result_id={result_id})")
+        except Exception as e:
+            print(f"[Delete] chat_history 삭제 실패 (result_id={result_id}): {e}")
+
+        if video_id:
+            try:
+                # 2-2. event 삭제
+                supabase.table("event").delete().eq("video_id", video_id).execute()
+            except Exception as e:
+                print(f"[Delete] event 삭제 실패: {e}")
+
+            try:
+                # 2-3. object_detection 삭제
+                supabase.table("object_detection").delete().eq("video_id", video_id).execute()
+            except Exception as e:
+                print(f"[Delete] object_detection 삭제 실패: {e}")
+
+            try:
+                # 2-4. tracking 삭제
+                supabase.table("tracking").delete().eq("video_id", video_id).execute()
+            except Exception as e:
+                print(f"[Delete] tracking 삭제 실패: {e}")
+
+        # 2-5. 부모 테이블인 analysis_result 삭제
+        supabase.table("analysis_result").delete().eq("result_id", result_id).execute()
+
+        # 2-6. 최상위 부모 테이블인 video_record 삭제
+        if video_id:
+            try:
+                supabase.table("video_record").delete().eq("video_id", video_id).execute()
+            except Exception as e:
+                print(f"[Delete] video_record 삭제 실패: {e}")
+
+        return {"message": "기록이 성공적으로 삭제되었습니다."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+class RenameRequest(BaseModel):
+    new_name: str
+
+@app.put("/api/results/{result_id}/rename")
+def rename_result(result_id: int, req: RenameRequest, authorization: Optional[str] = Header(None)):
+    """분석 결과의 영상 파일 이름(제목) 변경."""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    try:
+        token = (authorization or "").replace("Bearer ", "")
+        user = supabase.auth.get_user(token)
+        user_id = user.user.id if user and user.user else None
+        if not user_id:
+            raise HTTPException(status_code=401, detail="인증되지 않은 사용자입니다.")
+
+        res = supabase.table("analysis_result").select("*, video_record(*)").eq("result_id", result_id).single().execute()
+        if not res.data:
+            raise HTTPException(status_code=404, detail="결과를 찾을 수 없습니다.")
+
+        video_record = res.data.get("video_record")
+        if not video_record or video_record.get("user_id") != user_id:
+            raise HTTPException(status_code=403, detail="권한이 없습니다.")
+
+        video_id = video_record.get("video_id")
+        if video_id:
+            # 확장자 부분은 유지하고 파일명 변경
+            orig_name = video_record.get("original_name", "")
+            ext = os.path.splitext(orig_name)[1] if orig_name else ".mp4"
+            final_name = req.new_name if req.new_name.endswith(ext) else f"{req.new_name}{ext}"
+
+            supabase.table("video_record").update({"original_name": final_name}).eq("video_id", video_id).execute()
+
+        return {"message": "이름이 성공적으로 변경되었습니다.", "new_name": final_name}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 
 # 중요: 이 코드가 제일 마지막에 와야 합니다! (api 라우팅이 먼저 적용되어야 함)
 # 프론트엔드 폴더 전체를 정적으로 서빙 (마치 로컬 웹서버처럼 구동)
