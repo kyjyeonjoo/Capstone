@@ -43,10 +43,7 @@ app.add_middleware(
 
 MODEL_DIR = os.path.join(CURRENT_DIR, "..", "models")
 WEIGHTS_PATHS = {
-    "신호":  os.path.join(MODEL_DIR, "model_객체탐지_신호위반.pt"),
-    "안전모": os.path.join(MODEL_DIR, "model_객체탐지_안전모.pt"),
-    "중앙":  os.path.join(MODEL_DIR, "model_객체탐지_중앙선침범.pt"),
-    "진로":  os.path.join(MODEL_DIR, "model_객체탐지_진로변경.pt"),
+    "통합": os.path.join(MODEL_DIR, "best.pt")
 }
 
 TEMP_DIR = "temp_uploads"
@@ -90,6 +87,15 @@ class EmailCheck(BaseModel):
 class ResetPassword(BaseModel):
     email: str
 
+class RecoveryTokenExchange(BaseModel):
+    token_hash: Optional[str] = None
+    code: Optional[str] = None
+
+class PasswordResetConfirm(BaseModel):
+    token_hash: Optional[str] = None   # 신형 Supabase
+    access_token: Optional[str] = None # 구형 Implicit 방식
+    new_password: str
+
 class ProfileUpdate(BaseModel):
     nickname: Optional[str] = None
     password: Optional[str] = None
@@ -102,9 +108,11 @@ def update_profile(req: Request, data: ProfileUpdate):
         raise HTTPException(status_code=500, detail="Supabase not configured")
         
     auth_header = req.headers.get("Authorization")
+    print(f"[DEBUG] update_profile - auth_header received: {auth_header}")
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="인증 토큰이 없습니다.")
     token = auth_header.split(" ")[1]
+    print(f"[DEBUG] update_profile - extracted token value: {token}")
     
     try:
         update_data = {}
@@ -112,6 +120,7 @@ def update_profile(req: Request, data: ProfileUpdate):
             update_data["password"] = data.password
         if data.nickname:
             update_data["data"] = {"nickname": data.nickname}
+            update_data["user_metadata"] = {"nickname": data.nickname} # Supabase Auth REST API 명세 호환성 보장
             
         # Supabase Python 클라이언트의 세션 에러("Auth session missing!")를 우회하기 위해 REST API 직접 호출
         url = f"{SUPABASE_URL}/auth/v1/user"
@@ -121,10 +130,22 @@ def update_profile(req: Request, data: ProfileUpdate):
             "Content-Type": "application/json"
         }
         response = requests.put(url, headers=headers, json=update_data)
-        
+        print(f"[update-profile] Supabase 응답: {response.status_code} {response.text[:300]}")
+
         if not response.ok:
-            error_msg = response.json().get("msg", "변경 실패")
-            raise HTTPException(status_code=400, detail=error_msg)
+            try:
+                err_body = response.json()
+                # Supabase는 버전에 따라 msg / message / error_description 중 하나를 씀
+                error_msg = (
+                    err_body.get("msg")
+                    or err_body.get("message")
+                    or err_body.get("error_description")
+                    or err_body.get("error")
+                    or "회원정보 변경 실패"
+                )
+            except Exception:
+                error_msg = response.text or "회원정보 변경 실패"
+            raise HTTPException(status_code=response.status_code, detail=error_msg)
             
         user_data = response.json()
         user_id = user_data.get("id")
@@ -153,21 +174,159 @@ def check_email(data: EmailCheck):
     except Exception as e:
         raise HTTPException(status_code=400, detail="중복 확인 기능 에러 (users 테이블 확인 필요): " + str(e))
 
-@app.post("/api/reset-password")
-def reset_password(data: ResetPassword):
-    if not supabase:
-        raise HTTPException(status_code=500, detail="Supabase not configured")
-    try:
-        supabase.auth.reset_password_email(data.email)
-        return {"message": "비밀번호 재설정 이메일이 발송되었습니다."}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
 class ResetPasswordRequest(BaseModel):
     email: str
 
 class RefreshRequest(BaseModel):
     refresh_token: str
+
+@app.post("/api/auth/pkce-callback")
+def pkce_callback(data: RecoveryTokenExchange):
+    """Supabase 비밀번호 재설정 링크의 토큰을 실제 세션(access_token)으로 교환합니다.
+
+    Supabase 신형(sb_* 키) 프로젝트: ?token_hash=HASH&type=recovery
+    Supabase PKCE 방식:              ?code=CODE&type=recovery
+    Supabase 구형 Implicit 방식:     #access_token=JWT&type=recovery (프론트에서 직접 처리)
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    api_headers = {
+        "apikey": SUPABASE_KEY,
+        "Content-Type": "application/json"
+    }
+
+    # ── 방법 1: token_hash 방식 (Supabase 신형 이메일 링크 기본값) ──
+    if data.token_hash:
+        print(f"[Recovery] token_hash 방식 시도 (앞 10자: {data.token_hash[:10]}...)")
+        try:
+            resp = requests.post(
+                f"{SUPABASE_URL}/auth/v1/verify",
+                headers=api_headers,
+                json={"type": "recovery", "token_hash": data.token_hash}
+            )
+            print(f"[Recovery] /verify 응답: {resp.status_code} {resp.text[:200]}")
+            if resp.ok:
+                token_data = resp.json()
+                at = token_data.get("access_token")
+                rt = token_data.get("refresh_token")
+                if at:
+                    print("[Recovery] token_hash → /verify 성공")
+                    return {"access_token": at, "refresh_token": rt}
+        except Exception as e:
+            print(f"[Recovery] token_hash → /verify 예외: {e}")
+
+    # ── 방법 2: PKCE code 방식 ──
+    if data.code:
+        print(f"[Recovery] PKCE code 방식 시도 (앞 10자: {data.code[:10]}...)")
+        try:
+            resp = requests.post(
+                f"{SUPABASE_URL}/auth/v1/token?grant_type=pkce",
+                headers=api_headers,
+                json={"auth_code": data.code}
+            )
+            print(f"[Recovery] grant_type=pkce 응답: {resp.status_code} {resp.text[:200]}")
+            if resp.ok:
+                token_data = resp.json()
+                at = token_data.get("access_token")
+                rt = token_data.get("refresh_token")
+                if at:
+                    print("[Recovery] PKCE code → 교환 성공")
+                    return {"access_token": at, "refresh_token": rt}
+        except Exception as e:
+            print(f"[Recovery] PKCE code 예외: {e}")
+
+        # PKCE code를 token_hash로도 시도
+        try:
+            resp = requests.post(
+                f"{SUPABASE_URL}/auth/v1/verify",
+                headers=api_headers,
+                json={"type": "recovery", "token_hash": data.code}
+            )
+            if resp.ok:
+                token_data = resp.json()
+                at = token_data.get("access_token")
+                rt = token_data.get("refresh_token")
+                if at:
+                    print("[Recovery] code를 token_hash로 /verify 성공")
+                    return {"access_token": at, "refresh_token": rt}
+        except Exception as e:
+            print(f"[Recovery] code → /verify 예외: {e}")
+
+    print("[Recovery] 모든 방법 실패")
+    raise HTTPException(
+        status_code=400,
+        detail="비밀번호 재설정 링크가 만료되었거나 이미 사용된 링크입니다. 비밀번호 찾기를 다시 요청해주세요."
+    )
+
+
+@app.post("/api/reset-password-confirm")
+def reset_password_confirm(data: PasswordResetConfirm):
+    """비밀번호 재설정 링크의 token_hash와 새 비밀번호를 받아 한 번에 처리합니다.
+    프론트엔드에 JWT를 저장하지 않아도 되는 더 안전한 방식입니다."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    if not data.new_password or len(data.new_password) < 6:
+        raise HTTPException(status_code=400, detail="비밀번호는 6자 이상이어야 합니다.")
+
+    api_headers = {"apikey": SUPABASE_KEY, "Content-Type": "application/json"}
+    user_id = None
+
+    # ── Step 1: 토큰으로 user_id 획득 ──
+    if data.token_hash:
+        print(f"[PasswordReset] token_hash로 검증 시도 (앞 10자: {data.token_hash[:10]}...)")
+        try:
+            resp = requests.post(
+                f"{SUPABASE_URL}/auth/v1/verify",
+                headers=api_headers,
+                json={"type": "recovery", "token_hash": data.token_hash}
+            )
+            print(f"[PasswordReset] /verify 응답: {resp.status_code} {resp.text[:300]}")
+            if resp.ok:
+                body = resp.json()
+                user_id = (body.get("user") or {}).get("id") or body.get("id")
+        except Exception as e:
+            print(f"[PasswordReset] /verify 예외: {e}")
+
+    if not user_id and data.access_token:
+        print(f"[PasswordReset] access_token으로 user_id 조회")
+        try:
+            resp = requests.get(
+                f"{SUPABASE_URL}/auth/v1/user",
+                headers={**api_headers, "Authorization": f"Bearer {data.access_token}"}
+            )
+            print(f"[PasswordReset] /user 응답: {resp.status_code} {resp.text[:300]}")
+            if resp.ok:
+                user_id = resp.json().get("id")
+        except Exception as e:
+            print(f"[PasswordReset] /user 예외: {e}")
+
+    if not user_id:
+        raise HTTPException(status_code=400,
+            detail="비밀번호 재설정 링크가 만료되었거나 유효하지 않습니다. 다시 요청해주세요.")
+
+    # ── Step 2: 서비스 키로 비밀번호 직접 변경 ──
+    print(f"[PasswordReset] 관리자 API로 비밀번호 변경 (user_id={user_id})")
+    try:
+        resp = requests.put(
+            f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}",
+            headers={
+                **api_headers,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+            },
+            json={"password": data.new_password}
+        )
+        print(f"[PasswordReset] admin 변경 응답: {resp.status_code} {resp.text[:300]}")
+        if not resp.ok:
+            err = resp.json()
+            msg = err.get("message") or err.get("msg") or err.get("error_description") or "비밀번호 변경 실패"
+            raise HTTPException(status_code=400, detail=msg)
+        return {"message": "비밀번호가 성공적으로 변경되었습니다."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/api/refresh-token")
 def refresh_token_endpoint(data: RefreshRequest):
@@ -236,13 +395,27 @@ def login(user: UserAuth):
         raise HTTPException(status_code=401, detail="이메일 또는 비밀번호가 잘못되었습니다.")
 
 @app.post("/api/reset-password")
-def reset_password(req: ResetPasswordRequest):
+def reset_password(req: ResetPasswordRequest, request: Request):
     if not supabase:
         raise HTTPException(status_code=500, detail="Supabase not configured")
     try:
-        supabase.auth.reset_password_email(req.email)
+        print(f"[비밀번호 재설정] 이메일 발송 시도: {req.email}")
+
+        # 브라우저가 보낸 Origin 또는 Referer 헤더로 앱 URL 자동 감지
+        origin = request.headers.get("origin") or request.headers.get("referer", "")
+        # Referer가 경로까지 포함할 수 있으므로 루트만 사용
+        if origin:
+            from urllib.parse import urlparse
+            parsed = urlparse(origin)
+            app_url = f"{parsed.scheme}://{parsed.netloc}"
+        else:
+            app_url = "http://localhost:8000"  # 기본값 (필요시 수정)
+
+        print(f"[비밀번호 재설정] redirect_to → {app_url}")
+        supabase.auth.reset_password_email(req.email, {"redirect_to": app_url})
         return {"message": "비밀번호 재설정 링크가 발송되었습니다."}
     except Exception as e:
+        print(f"[비밀번호 재설정] 오류: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 
@@ -414,6 +587,8 @@ def analyze_video(
         print("✅ 전체 분석 완료!")
 
     except Exception as e:
+        import traceback
+        traceback.print_exc() # 상세 에러 추적 출력 추가
         print(f"분석 오류: {e}")
         if supabase and video_id:
             supabase.table("video_record").update({"status": "실패"}).eq("video_id", video_id).execute()
@@ -689,6 +864,19 @@ def rename_result(result_id: int, req: RenameRequest, authorization: Optional[st
 
 
 # 중요: 이 코드가 제일 마지막에 와야 합니다! (api 라우팅이 먼저 적용되어야 함)
-# 프론트엔드 폴더 전체를 정적으로 서빙 (마치 로컬 웹서버처럼 구동)
 FRONTEND_DIR = os.path.join(CURRENT_DIR, "..", "frontend")
+
+# HTML 파일은 캐시 없이 항상 최신 버전을 서빙 (JS/CSS 변경 시 즉시 반영)
+from fastapi.responses import FileResponse
+
+@app.get("/")
+@app.get("/index.html")
+async def serve_index():
+    resp = FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
+
+# JS/CSS 등 정적 파일은 StaticFiles로 서빙
 app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")

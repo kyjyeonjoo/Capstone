@@ -195,25 +195,92 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Handle password recovery token from URL hash
-    if (window.location.hash && window.location.hash.includes('type=recovery')) {
-        const hashParams = new URLSearchParams(window.location.hash.substring(1));
-        const accessToken = hashParams.get('access_token');
+    // ── 비밀번호 재설정 링크 처리 ──
+    // Supabase URL 형식:
+    //  [신형] ?token_hash=HASH&type=recovery  ← sb_* 키 프로젝트 기본값
+    //  [PKCE] ?code=CODE&type=recovery
+    //  [구형] #access_token=JWT&type=recovery ← Implicit flow
+    function getUrlParam(name) {
+        const val = new URLSearchParams(window.location.search).get(name);
+        if (val) return val;
+        if (window.location.hash) {
+            const hashStr = window.location.hash.substring(1);
+            const hashVal = new URLSearchParams(
+                hashStr.includes('?') ? hashStr.split('?')[1] : hashStr
+            ).get(name);
+            if (hashVal) return hashVal;
+        }
+        return null;
+    }
 
-        if (accessToken) {
-            localStorage.setItem('access_token', accessToken);
-            window.location.hash = '';
-            setTimeout(() => {
-                showToast('비밀번호 재설정 모드로 진입했습니다. 새 비밀번호를 설정해주세요.', 'success');
-                if (profileModal) {
-                    const titleEl = document.getElementById('profileModalTitle');
-                    const sectionEl = document.getElementById('profileNonPasswordSection');
-                    if (titleEl) titleEl.textContent = '새 비밀번호 설정';
-                    if (sectionEl) sectionEl.style.display = 'none';
-                    profileModal.classList.add('active');
-                }
-            }, 500);
-            updateUIState();
+    function cleanUrl() {
+        window.location.hash = '';
+        if (window.history && window.history.replaceState) {
+            window.history.replaceState(null, null, window.location.pathname);
+        }
+    }
+
+    // 재설정 토큰을 JS 변수에만 보관 (localStorage에 JWT 저장 안 함)
+    let recoveryTokenHash = null;
+    let recoveryAccessToken = null;
+
+    function openPasswordResetModal() {
+        localStorage.setItem('is_recovery_mode', 'true');
+        setTimeout(() => {
+            showToast('비밀번호 재설정 모드입니다. 새 비밀번호를 설정해주세요.', 'success');
+            if (profileModal) {
+                const titleEl = document.getElementById('profileModalTitle');
+                const sectionEl = document.getElementById('profileNonPasswordSection');
+                if (titleEl) titleEl.textContent = '새 비밀번호 설정';
+                if (sectionEl) sectionEl.style.display = 'none';
+                profileModal.classList.add('active');
+            }
+        }, 400);
+    }
+
+    // ★ 파라미터를 먼저 읽고, 그 다음 URL을 정리
+    const recoveryType = getUrlParam('type');
+    const isRecovery   = recoveryType === 'recovery';
+
+    // 이전 실패한 시도에서 is_recovery_mode가 localStorage에 남아있을 수 있음
+    // 실제 복구 URL이 아닌데 플래그만 남아있으면 제거
+    if (!isRecovery && localStorage.getItem('is_recovery_mode') === 'true') {
+        console.log('[Recovery] 잔여 is_recovery_mode 플래그 정리');
+        localStorage.removeItem('is_recovery_mode');
+        // access_token이 "null" 문자열이면 함께 정리
+        if (localStorage.getItem('access_token') === 'null') {
+            localStorage.removeItem('access_token');
+        }
+    }
+
+    if (isRecovery) {
+        // ★ 파라미터를 먼저 읽고, 그 다음에 URL을 정리해야 합니다
+        const tokenHash    = getUrlParam('token_hash');
+        const pkceCode     = getUrlParam('code');
+        const accessToken  = getUrlParam('access_token');
+        const refreshToken = getUrlParam('refresh_token');
+
+        cleanUrl(); // 파라미터 저장 후 URL 정리
+
+        console.log('[Recovery] ★ 비밀번호 재설정 링크 감지 ★');
+        console.log('[Recovery] token_hash   :', tokenHash   ? tokenHash.slice(0, 15)   + '...' : '없음');
+        console.log('[Recovery] code         :', pkceCode    ? pkceCode.slice(0, 15)    + '...' : '없음');
+        console.log('[Recovery] access_token :', accessToken ? accessToken.slice(0, 15) + '...' : '없음');
+
+        if (tokenHash) {
+            recoveryTokenHash = tokenHash;
+            openPasswordResetModal();
+        } else if (pkceCode) {
+            recoveryTokenHash = pkceCode;
+            openPasswordResetModal();
+        } else if (accessToken && accessToken.split('.').length === 3) {
+            // 구형 Implicit 방식: access_token이 URL hash에 바로 포함된 경우
+            recoveryAccessToken = accessToken;
+            if (refreshToken) localStorage.setItem('refresh_token', refreshToken);
+            openPasswordResetModal();
+        } else {
+            console.error('[Recovery] 유효한 토큰 파라미터를 찾지 못했습니다.');
+            showToast('비밀번호 재설정 링크가 유효하지 않습니다. 다시 요청해주세요.', 'error');
         }
     }
 
@@ -448,7 +515,66 @@ document.addEventListener('DOMContentLoaded', () => {
     if (updatePasswordBtn) {
         updatePasswordBtn.addEventListener('click', async () => {
             const newPassword = document.getElementById('profilePassword').value;
-            if (!newPassword || newPassword.length < 6) return showToast('비밀번호는 6자 이상이어야 합니다.', 'error');
+            if (!newPassword || newPassword.length < 6) {
+                return showToast('비밀번호는 6자 이상이어야 합니다.', 'error');
+            }
+
+            const isRecoveryMode = localStorage.getItem('is_recovery_mode') === 'true';
+
+            // ── Recovery 모드: token_hash / access_token 으로 직접 변경 ──
+            if (isRecoveryMode) {
+                if (!recoveryTokenHash && !recoveryAccessToken) {
+                    return showToast('인증 정보가 없습니다. 이메일의 재설정 링크를 다시 클릭해 주세요.', 'error');
+                }
+
+                updatePasswordBtn.textContent = '변경 중...';
+                updatePasswordBtn.disabled = true;
+
+                try {
+                    const payload = { new_password: newPassword };
+                    if (recoveryTokenHash)   payload.token_hash   = recoveryTokenHash;
+                    if (recoveryAccessToken) payload.access_token = recoveryAccessToken;
+
+                    const res = await fetch('/api/reset-password-confirm', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.detail || '변경 실패');
+
+                    showToast('비밀번호가 성공적으로 변경되었습니다!', 'success');
+                    document.getElementById('profilePassword').value = '';
+                    recoveryTokenHash = null;
+                    recoveryAccessToken = null;
+                    localStorage.removeItem('is_recovery_mode');
+                    localStorage.removeItem('access_token');
+                    localStorage.removeItem('refresh_token');
+                    if (profileModal) profileModal.classList.remove('active');
+
+                    setTimeout(() => {
+                        showToast('변경된 비밀번호로 로그인해주세요.', 'info');
+                        if (authModal) {
+                            const loginTab = document.querySelector('.modal-tab[data-target="loginFormView"]');
+                            if (loginTab) loginTab.click();
+                            authModal.classList.add('active');
+                        }
+                    }, 1000);
+                } catch (err) {
+                    showToast(err.message, 'error');
+                } finally {
+                    updatePasswordBtn.textContent = '비밀번호 변경';
+                    updatePasswordBtn.disabled = false;
+                }
+                return;
+            }
+
+            // ── 일반 로그인 상태에서 비밀번호 변경 ──
+            const token = await getValidToken();
+            const isValidJwt = token && token !== 'null' && token.split('.').length === 3;
+            if (!isValidJwt) {
+                return showToast('로그인이 필요합니다.', 'error');
+            }
 
             updatePasswordBtn.textContent = '변경 중...';
             updatePasswordBtn.disabled = true;
@@ -458,7 +584,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+                        'Authorization': `Bearer ${token}`
                     },
                     body: JSON.stringify({ password: newPassword })
                 });
@@ -619,6 +745,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- Dynamic Analysis History Loader ---
     async function loadAnalysisHistory() {
         if (!isLoggedIn) return;
+        if (localStorage.getItem('is_recovery_mode') === 'true') return; // 비밀번호 찾기 세션 도중 함부로 토큰 검증 차단
 
         try {
             const token = await getValidToken();
@@ -932,6 +1059,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function initSession() {
+        if (localStorage.getItem('is_recovery_mode') === 'true') {
+            // 비밀번호 재설정 모드일 때는 세션을 강제 초기화하지 않고 즉시 탈출합니다.
+            return;
+        }
         const token = await getValidToken();
         const savedUser = localStorage.getItem('user_email');
         if (token && savedUser) {

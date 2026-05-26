@@ -8,6 +8,25 @@ import warnings
 warnings.filterwarnings("ignore", category=FutureWarning, message=".*torch\.cuda\.amp\.autocast.*")
 warnings.filterwarnings("ignore", category=FutureWarning, module="models.common")
 
+# ──────────────────────────────────────────────────────────────────
+# 모델 클래스명 → fault_analyzer 기대 클래스명 정규화 매핑
+# best.pt 학습 시 사용된 클래스명과 fault_analyzer 판단 로직에서
+# 기대하는 클래스명이 달라서 필요한 변환 테이블
+# ──────────────────────────────────────────────────────────────────
+CLASS_NAME_MAP = {
+    "vehicle":      "car",         # 차량 → 일반 차량 (car/bus/truck/motorcycle 공통 처리)
+    "red_light":    "red",         # 적색 신호 → red
+    "green_light":  "green_light",
+    "yellow_light": "yellow_light",
+    "left_light":   "left_light",
+    "stop_line":    "stopline",    # 정지선 → stopline
+    "crosswalk":    "crosswalk",
+    "center_line":  "yellowline",  # 중앙선(황색) → yellowline
+    "white_line":   "white_line",  # 백색 차선
+    "helmet":       "helmet",
+    "no_helmet":    "no_helmet",
+}
+
 def compute_iou(boxA, boxB):
     xA = max(boxA[0], boxB[0])
     yA = max(boxA[1], boxB[1])
@@ -148,6 +167,26 @@ def analyze_video_with_yolo(video_path, weights_paths, video_id="WEB_UP_001"):
     current_dir = os.path.dirname(os.path.abspath(__file__))
     yolo_repo_dir = os.path.join(current_dir, "..", "yolov5")
     
+    # AutoShape._apply의 AttributeError: 'Detect' object has no attribute 'grid' 패치 (PyTorch 버전/모델 호환성 문제 해결)
+    import sys
+    if yolo_repo_dir not in sys.path:
+        sys.path.append(yolo_repo_dir)
+        
+    try:
+        from models.common import AutoShape
+        _original_apply = AutoShape._apply
+        def safe_apply(self, fn):
+            if self.pt:
+                m = self.model.model.model[-1] if self.dmb else self.model.model[-1]  # Detect()
+                if not hasattr(m, 'grid'):
+                    m.grid = [torch.empty(0) for _ in range(getattr(m, 'nl', 3))]
+                if not hasattr(m, 'anchor_grid'):
+                    m.anchor_grid = [torch.empty(0) for _ in range(getattr(m, 'nl', 3))]
+            return _original_apply(self, fn)
+        AutoShape._apply = safe_apply
+    except Exception as e:
+        print(f"[경고] AutoShape._apply 패치 적용 실패: {e}")
+
     # PyTorch 2.6+ 대응: torch.load가 기본적으로 weights_only=False로 동작하도록 임시 패치
     _original_load = torch.load
     def safe_load(*args, **kwargs):
@@ -156,28 +195,68 @@ def analyze_video_with_yolo(video_path, weights_paths, video_id="WEB_UP_001"):
     
     torch.load = safe_load
     try:
+        models = {}
         if isinstance(weights_paths, dict):
-            models = {}
-            for m_name, path in weights_paths.items():
-                # 인터넷 다운로드 대신 로컬(source='local') 리포지토리 사용
-                loaded = torch.hub.load(repo_or_dir=yolo_repo_dir, model='custom', path=path, source='local', force_reload=False)
-                loaded.conf = 0.70
-                models[m_name] = loaded
+            paths_dict = weights_paths
         else:
-            # 하위호환을 위해 단일 문자열 경로일 경우
-            loaded = torch.hub.load(repo_or_dir=yolo_repo_dir, model='custom', path=weights_paths, source='local', force_reload=False)
-            loaded.conf = 0.70 
-            models = {"기본": loaded}
+            paths_dict = {"기본": weights_paths}
+
+        for m_name, path in paths_dict.items():
+            if not os.path.exists(path):
+                print(f"[YOLO 경고] 모델 파일이 존재하지 않습니다: {path}")
+                continue
+            
+            # 1. YOLOv8 (ultralytics) 로딩 우선 시도
+            try:
+                from ultralytics import YOLO
+                print(f"[YOLO] YOLOv8 모델 로딩 시도: {m_name} ← {path}")
+                loaded = YOLO(path)
+                print(f"[YOLO] YOLOv8 모델 '{m_name}' 로딩 완료. 클래스 목록: {loaded.names}")
+                models[m_name] = {"type": "yolov8", "model": loaded}
+            except Exception as e8:
+                print(f"[YOLO] YOLOv8 로딩 실패 ({e8}), YOLOv5 로딩 시도...")
+                # 2. 기존 YOLOv5 (Hub) 로딩 Fallback
+                try:
+                    loaded = torch.hub.load(repo_or_dir=yolo_repo_dir, model='custom', path=path, source='local', force_reload=False)
+                    loaded.conf = 0.30 if isinstance(weights_paths, dict) else 0.70
+                    print(f"[YOLO] YOLOv5 모델 '{m_name}' 로딩 완료. 클래스 목록: {loaded.names}")
+                    models[m_name] = {"type": "yolov5", "model": loaded}
+                except Exception as e5:
+                    print(f"[YOLO 오류] 모델 '{m_name}' 로딩 실패: {e5}")
+
+        if not models:
+            raise ValueError("[YOLO] 로딩된 모델이 없습니다. 모델 파일 경로를 확인하세요.")
     finally:
         torch.load = _original_load
     
+    # ── Detect layer 내부 구조 진단 (nc/no 불일치 확인) ──
+    for m_name, model_info in models.items():
+        m_obj = model_info["model"]
+        m_type = model_info["type"]
+        try:
+            if m_type == "yolov5":
+                detect_m = m_obj.model.model[-1]
+                real_nc = getattr(detect_m, 'nc', '?')
+                real_no = getattr(detect_m, 'no', '?')
+                names_count = len(m_obj.names)
+                print(f"[YOLO DIAG] 모델={m_name} (YOLOv5) | Detect.nc={real_nc}, Detect.no={real_no} | names 수={names_count}")
+                if isinstance(real_nc, int) and real_nc != names_count:
+                    print(f"[YOLO DIAG] ⚠️  nc({real_nc}) ≠ names 수({names_count}) → 아키텍처/메타데이터 불일치! cls_id가 names 범위 밖으로 나올 수 있음")
+            else:
+                print(f"[YOLO DIAG] 모델={m_name} (YOLOv8) | classes={m_obj.names}")
+        except Exception as diag_e:
+            print(f"[YOLO DIAG] 모델={m_name} 진단 실패: {diag_e}")
+
+    print(f"[YOLO] 영상 열기 시도: {video_path}")
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        raise ValueError("비디오 파일을 열 수 없습니다.")
+        raise ValueError(f"비디오 파일을 열 수 없습니다: {video_path}")
 
     orig_fps = cap.get(cv2.CAP_PROP_FPS)
+    total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    print(f"[YOLO] 영상 정보 — FPS: {orig_fps}, 전체 프레임 수: {total_video_frames}")
     if orig_fps <= 0: orig_fps = 30
-    
+
     target_fps = 5
     frame_interval = max(int(round(orig_fps / target_fps)), 1)
 
@@ -196,15 +275,79 @@ def analyze_video_with_yolo(video_path, weights_paths, video_id="WEB_UP_001"):
             
         # 모든 모델에 대해 추론하고 1차 수집
         all_detections = []
-        for m_name, model in models.items():
-            results = model(frame)
-            df = results.pandas().xyxy[0]
-            for index, row in df.iterrows():
-                all_detections.append({
-                    "bbox": [int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax'])],
-                    "name": f"[{m_name}] {row['name']}",
-                    "confidence": round(float(row['confidence']), 4)
-                })
+        for m_name, model_info in models.items():
+            m_type = model_info["type"]
+            model = model_info["model"]
+            
+            if m_type == "yolov8":
+                conf_val = 0.30 if len(models) > 1 or m_name == "통합" else 0.70
+                results = model(frame, conf=conf_val, verbose=False)
+                if len(results) > 0:
+                    result = results[0]
+                    for box in result.boxes:
+                        x1, y1, x2, y2 = box.xyxy[0].tolist()
+                        conf = float(box.conf[0])
+                        cls_id = int(box.cls[0])
+                        
+                        cls_name = None
+                        names = model.names
+                        if isinstance(names, dict):
+                            cls_name = names.get(cls_id) or names.get(str(cls_id))
+                        elif isinstance(names, list) and 0 <= cls_id < len(names):
+                            cls_name = names[cls_id]
+                        if not cls_name:
+                            cls_name = f"class_{cls_id}"
+
+                        # 첫 탐지 시 디버그 로그
+                        if processed_count == 0 and len(all_detections) == 0:
+                            print(f"[YOLO DEBUG] YOLOv8 첫 탐지 상세: cls_id={cls_id}, cls_name='{cls_name}', names={names}")
+
+                        mapped_name = CLASS_NAME_MAP.get(cls_name, cls_name)
+                        clean_name = mapped_name if m_name == "통합" else f"[{m_name}] {mapped_name}"
+                        all_detections.append({
+                            "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                            "name": clean_name,
+                            "confidence": round(float(conf), 4)
+                        })
+            else:
+                # YOLOv5 추론
+                results = model(frame)
+                if processed_count == 0:
+                    # 첫 프레임에서만 raw pred 출력 (디버그용)
+                    raw = results.pred[0] if hasattr(results, 'pred') and len(results.pred) > 0 else None
+                    print(f"[YOLO DEBUG] YOLOv5 첫 프레임 탐지 결과 (모델={m_name}): {raw.shape if raw is not None else 'None'} | 탐지 수={len(raw) if raw is not None else 0}")
+                # results.pandas() 호출 시 내부 KeyError: 5006 방지 및 안전 예외 처리를 위해 results.pred 직접 파싱
+                if hasattr(results, 'pred') and len(results.pred) > 0:
+                    pred = results.pred[0]
+                    for det in pred:
+                        x1, y1, x2, y2, conf, cls = det.tolist()
+                        cls_id = int(cls)
+                        
+                        # model.names가 딕셔너리인지 리스트인지에 따른 극도의 안전한 매칭 조회
+                        cls_name = None
+                        names = model.names
+                        if isinstance(names, dict):
+                            cls_name = names.get(cls_id) or names.get(str(cls_id))
+                        elif isinstance(names, list) and 0 <= cls_id < len(names):
+                            cls_name = names[cls_id]
+                        if not cls_name:
+                            cls_name = f"class_{cls_id}"
+
+                        # 첫 탐지 시 raw 값 전체 출력 (모델 nc 불일치 원인 파악용)
+                        if processed_count == 0 and len(all_detections) == 0:
+                            h_f, w_f = frame.shape[:2]
+                            print(f"[YOLO DIAG] 원본 해상도: {w_f}x{h_f}")
+                            print(f"[YOLO DIAG] YOLOv5 첫 탐지 raw 6값: {[round(v,4) for v in det.tolist()]}")
+                            print(f"[YOLO DIAG]   → x1={x1:.1f}, y1={y1:.1f}, x2={x2:.1f}, y2={y2:.1f}, conf={conf:.6f}, cls={cls:.2f}")
+                            print(f"[YOLO DIAG]   → cls_id(int)={cls_id}, raw_name='{cls_name}'")
+
+                        mapped_name = CLASS_NAME_MAP.get(cls_name, cls_name)
+                        clean_name = mapped_name if m_name == "통합" else f"[{m_name}] {mapped_name}"
+                        all_detections.append({
+                            "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                            "name": clean_name,
+                            "confidence": round(float(conf), 4)
+                        })
         
         # 신뢰도 내림차순 정렬
         all_detections = sorted(all_detections, key=lambda x: x['confidence'], reverse=True)
@@ -247,4 +390,5 @@ def analyze_video_with_yolo(video_path, weights_paths, video_id="WEB_UP_001"):
         processed_count += 1
         
     cap.release()
+    print(f"[YOLO] 분석 완료 — 처리 프레임: {processed_count}, 총 탐지 기록 수: {len(extracted_records)}")
     return {"total_frames": processed_count, "records": extracted_records}
