@@ -31,7 +31,7 @@ if not OPENROUTER_API_KEY:
 
 # yolo_inference.py에서 로직 가져오기
 from yolo_inference import analyze_video_with_yolo
-from fault_analyzer import analyze_fault
+from fault_analyzer import analyze_fault, enrich_case_laws
 
 app = FastAPI()
 app.add_middleware(
@@ -500,7 +500,9 @@ def get_result_detail(result_id: int):
                 case_res = supabase.table("case_law").select(
                     "case_title, case_number, court_name, decision_date, summary, fault_ratio"
                 ).eq("accident_type_id", accident_type_id).limit(3).execute()
-                case_laws = case_res.data or []
+                raw_cases = case_res.data or []
+                # 동적 복원 및 가공 헬퍼 통과!
+                case_laws = enrich_case_laws(raw_cases, detected_events)
             except Exception as e:
                 print(f"[DB] case_law 조회 오류: {e}")
 
@@ -650,11 +652,12 @@ def chat_with_ai(data: ChatRequest, authorization: Optional[str] = Header(None))
     system_prompt = (
         "당신은 'AI 교통사고 법률 보조 시스템'의 전문 상담 챗봇입니다. "
         "사용자가 제공한 블랙박스 영상 분석 결과를 바탕으로 사고 과실 비율을 추정하고, 관련 법률 및 대법원 판례를 근거로 전문적인 조언을 제공합니다. "
+        "분석 결과에 연동된 도로교통법 조문과 판례 요약(사실관계 및 대법원 판결의 요지)을 최대한 자세하게 해설해 주세요. "
         "친절하고 명확하게 답변하며, 분석된 결과가 있으면 이를 십분 활용하여 답변하세요."
     )
 
     if data.accident_data:
-        system_prompt += f"\n\n[영상 분석 결과 컨텍스트]\n{str(data.accident_data)}"
+        system_prompt += f"\n\n[영상 분석 결과 컨텍스트 (적용 법규 및 관련 판례 정보 포함)]\n{str(data.accident_data)}"
 
     models_to_try = [
         "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"

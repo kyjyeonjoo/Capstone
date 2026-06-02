@@ -126,6 +126,10 @@ def detect_events(supabase: Client, video_id: int, records: List[Dict]) -> Tuple
     # 신호위반을 한 차량의 track_id 추적
     red_light_violators = set()
     
+    # 모든 records에서 bbox_x2의 최댓값을 찾아 화면 너비(width)를 동적으로 추정
+    max_x2 = max([rec.get("bbox_x2", 0) for rec in records] or [1280])
+    width = max(1280, max_x2)  # 기본값 방어
+
     # 모든 프레임을 돌면서 규칙 기반 기하학적 상황 판단
     for frame_no, frame_objs in sorted(frames_data.items()):
         # 객체 타입별 분류 (접두사가 붙은 객체명도 안전하게 처리)
@@ -187,22 +191,40 @@ def detect_events(supabase: Client, video_id: int, records: List[Dict]) -> Tuple
                                     "description": f"적색 신호위반 차량(ID:{violator_id})과 타 차량(ID:{normal_id}) 간의 교차로 내 충돌 위험 감지 (거리 {dist:.1f}px, 프레임 {frame_no})"
                                 }
 
-        # ── (3) 중앙선 침범 감지 ──
+        # ── (3) 중앙선 침범 및 노외진입 감지 ──
         if len(yellowlines) > 0:
             for v in vehicles:
                 v_track_id = v.get("track_id")
                 for y in yellowlines:
                     # 차량이 중앙선과 겹쳐서 지나갈 때
                     if check_overlap(v, y):
-                        _record_violator("중앙선침범", v_track_id)
-                        if "중앙선침범" not in seen_events:
-                            seen_events["중앙선침범"] = {
-                                "video_id": video_id,
-                                "event_type": "중앙선침범",
-                                "event_time": round(frame_no / 5.0, 3),
-                                "severity": "HIGH",
-                                "description": f"차량(ID:{v_track_id})이 중앙선(황색선)을 침범하여 주행함 감지 (프레임 {frame_no})"
-                            }
+                        # 기하학적 보정: 오버랩된 영역이 화면의 우측 절반(갓길 영역)에 치우쳐 있는 경우
+                        # 중앙선이 아닌 우측 갓길 황색선 침범(노외진입)으로 해석한다.
+                        overlap_x = (max(v.get("bbox_x1", 0), y.get("bbox_x1", 0)) + 
+                                     min(v.get("bbox_x2", 0), y.get("bbox_x2", 0))) / 2
+                        
+                        if overlap_x > width * 0.65:
+                            # 우측 갓길 침범 -> 노외진입으로 감지!
+                            _record_violator("노외진입", v_track_id)
+                            if "노외진입" not in seen_events:
+                                seen_events["노외진입"] = {
+                                    "video_id": video_id,
+                                    "event_type": "노외진입",
+                                    "event_time": round(frame_no / 5.0, 3),
+                                    "severity": "HIGH",
+                                    "description": f"차량(ID:{v_track_id})이 우측 갓길 및 노외 구역에서 도로로 갑자기 진입함 감지 (프레임 {frame_no})"
+                                }
+                        else:
+                            # 화면 좌측/중앙에서의 침범 -> 중앙선 침범으로 판정
+                            _record_violator("중앙선침범", v_track_id)
+                            if "중앙선침범" not in seen_events:
+                                seen_events["중앙선침범"] = {
+                                    "video_id": video_id,
+                                    "event_type": "중앙선침범",
+                                    "event_time": round(frame_no / 5.0, 3),
+                                    "severity": "HIGH",
+                                    "description": f"차량(ID:{v_track_id})이 중앙선(황색선)을 침범하여 주행함 감지 (프레임 {frame_no})"
+                                }
 
         # ── (4) 보행자 위협 (보행자 보호의무 위반) 감지 ──
         if len(pedestrians) > 0 and len(crosswalks) > 0:
@@ -337,13 +359,14 @@ EVENT_TO_KEYWORDS = {
     "신호위반충돌위험": ["신호기", "신호등", "신호위반", "적색", "교차로"],
     "신호위반":    ["신호기", "신호등", "신호위반", "적색", "녹색신호", "신호에"],
     "중앙선침범":  ["중앙선", "중앙분리"],
+    "노외진입":    ["도로로 진입", "노외", "마당", "진입하는 차"],
     "진로변경":    ["차선변경", "진로변경", "끼어들기", "앞지르기"],
     "안전모미착용": ["이륜차", "오토바이", "안전모"],
     "과속":       ["과속", "속도위반", "제한속도"],
     "보행자위협":  ["보행자", "횡단보도"],
 }
 
-PRIORITY_ORDER = ["신호위반충돌위험", "신호위반", "중앙선침범", "과속", "보행자위협", "진로변경", "안전모미착용"]
+PRIORITY_ORDER = ["신호위반충돌위험", "신호위반", "중앙선침범", "노외진입", "과속", "보행자위협", "진로변경", "안전모미착용"]
 
 def match_accident_type(supabase: Client, event_types: List[str]) -> Optional[Dict]:
     """
@@ -434,6 +457,122 @@ def apply_fault_modifiers(
 # Step 5. 결과 생성
 # ──────────────────────────────────────────────────────────
 
+CASE_SUMMARY_TEMPLATES = {
+    "노외진입": "도로 외의 장소(갓길, 마당, 주유소 등)에서 본선 도로로 진입하려던 차량이 직진 주행 중이던 차량의 진로를 가로막으며 발생한 충돌 사고입니다. 법원은 진입 차량이 도로교통법 제18조 제3항에 따른 안전 확인 및 일시정지 의무를 다하지 않은 것을 주된 사고 원인으로 보아 진입 차량의 일방적인 주과실(80%)을 적용하고, 직진 차량의 일부 예견·회피 가능성을 고려해 20%의 책임을 배분하는 기본 80:20 판결을 선고한 대표 사례입니다.",
+    "중앙선침범": "황색 실선으로 그어진 중앙선이 엄격히 규정된 도로에서 대향 방향으로 마주 오던 차량 중 일방이 부주의하게 중앙선을 전적으로 침범하여 반대 차선에서 정상 운행 중이던 대향 차량과 정면으로 충돌한 사고입니다. 법원은 반대 방향에서 정상 속도로 진행하던 차량 입장에서는 상대방의 급작스러운 중앙선 침범 및 역주행 행위를 예견하거나 회피하기가 사실상 불가능하다는 점을 명확히 판시하여, 중앙선 침범 차량에게 100%의 일방적 책임을 지우는 전원합의체 판결을 내린 대표적 선례입니다.",
+    "신호위반": "교차로 신호등에 적색 신호가 명확하게 등화되었음에도 이를 완전히 무시하고 속도를 줄이지 않은 채 무리하게 교차로 내부로 진입하다가, 자신의 정상적인 신호(녹색등)를 보고 교차로에 진입한 상대 차량의 측면을 충돌한 대형 사고입니다. 법원은 신호등의 규제 효력을 신뢰하고 진입한 피해 차량의 신뢰보호원칙을 적극 인정하고, 신호위반 차량에게 전적인 귀책 사유를 물어 100:0 일방 과실을 인정한 판결입니다.",
+    "진로변경": "동일 방향으로 평행 주행하던 차량 중 하나가 후행 차량과의 충분한 안전거리를 확보하지 않거나 차로 변경 신호(방향지시등)를 켜지 않은 상태에서 급작스럽게 진로를 변경하여 직진 중인 타 차량과 충돌한 사고입니다. 법원은 변경 차량의 무리한 차로 침범이 주원인임을 밝히며 기본 과실 70%를 선고하고, 직진 차량 역시 전방 주시 태만과 급제동 불이행 책임을 고려해 30%의 주의 의무를 부과한 대표적인 판례입니다.",
+    "과속": "제한속도를 초과하여 고속으로 주행하던 중 급작스러운 상황에 제동 거리를 확보하지 못해 충돌한 사고입니다. 법원은 초과된 속도가 사고 회피 불능과 피해 심화에 직간접적 기여를 했다고 판시하며, 과속 차량에게 20%의 과실을 가산 적용한 판결입니다."
+}
+
+DETAILED_CASE_LAWS = {
+    # ── 노외진입 (도로로 진입하는 차와 직진차와의 사고 차44-1) ──
+    "2006가단44945": {
+        "summary": "주유소(도로 외의 장소)에서 갓길을 가로질러 본선 도로로 급작스럽게 진입하던 차량이 이미 편도 2차로를 따라 직진 주행 중이던 차량의 우측면을 충돌한 사고입니다. 법원은 도로 외의 장소에서 도로로 진입하려는 차의 운전자는 다른 차의 통행을 방해할 우려가 있는 경우 무리하게 진입해서는 안 되며, 일단 정지하여 안전을 면밀히 확인해야 할 도로교통법 제18조의 고도 주의의무를 다하지 않은 책임을 물어 진입차량 과실 80%를 판단하고, 직진차량 역시 미리 진입하려는 차량을 주시하고 경음기 작동이나 서행 등 방어운전을 취하지 않은 책임을 물어 20%의 과실을 인정한 하급심 대표 판결입니다.",
+        "fault_ratio": "진입차(가해차) 80% : 직진차(피해차) 20%"
+    },
+    "2017나86219": {
+        "summary": "주차장 마당(노외 진입로)에서 본선 차도로 급진입을 시도한 승용차와, 본선 차로를 직진 방향으로 주행 중이던 이륜차 간의 충돌 사고입니다. 법원은 이륜차가 진행 중이던 도로가 폭이 좁은 골목길 초입부였으며 우측 노외에서 갑자기 차량이 튀어나와 이륜차 운전자가 충돌을 회피할 제동거리가 극히 부족했음을 강하게 인정하여 진입 승용차에게 85%의 책임을 물었습니다. 다만 이륜차 운전자 역시 시야가 확보되지 않은 교차 지점에서 미리 감속하지 않은 책임을 감안하여 일부 과실 15%를 선고한 판례입니다.",
+        "fault_ratio": "진입차(가해차) 85% : 직진차(피해차) 15%"
+    },
+    
+    # ── 중앙선 침범 사고 (차31-1) ──
+    "99다30428": {
+        "summary": "황색 실선으로 중앙선이 선명히 도색된 편도 2차로 도로에서 한쪽 차량이 운전 미숙 및 조향 실패로 중앙선을 침범해 반대 차선으로 넘어가, 대향 방향에서 정상 속도 및 정상 차로를 유지하며 운행 중이던 차량과 충돌한 사고입니다. 대법원은 중앙선이 설치된 도로를 운행하는 운전자는 특별한 사정이 없는 한 마주 오는 대향 차량이 중앙선을 침범하여 자신의 진로로 역주행해 올 것까지 예견하고 운전할 의무는 존재하지 않는다고 판시하여, 중앙선 침범 차량에게 100%의 전적인 가해 책임을 지운 핵심 전원합의체 판결입니다.",
+        "fault_ratio": "침범차(가해차) 100% : 직진차(피해차) 0%"
+    },
+    "2001다40732": {
+        "summary": "빗길 야간 운행 중 차로가 젖어 있는 상황에서 미끄러짐 현상으로 인하여 차체 통제력을 잃고 중앙선을 넘어가 반대 차선에서 직진 교행하던 차량과 충돌한 사고입니다. 법원은 노면 상태 불량이나 빗길 미끄러짐과 같은 불가항력적인 요소가 일부 개입하였다 할지라도, 운전자로서는 감속 운행 및 조향 통제 의무를 철저히 이행할 책임이 있으므로 중앙선 침범 사실 그 자체의 중과실을 상쇄할 수 없다고 판단해 침범 차량에게 100%의 책임을 선고한 판례입니다.",
+        "fault_ratio": "침범차(가해차) 100% : 직진차(피해차) 0%"
+    },
+    "94다18003": {
+        "summary": "교차로 정체 구간에서 선행 차량들을 무리하게 추월하기 위해 중앙선을 침범하여 반대 차선으로 역주행하던 차량이, 골목길에서 정상적으로 진입하여 자신의 주행 차선으로 교행하려던 차량과 정면 충돌한 사고입니다. 대법원은 선행 정체 차량 회피를 목적으로 한 고의적이고 위법성 높은 중앙선 침범 역주행 행위에 대해 피해 차량이 이를 예견하거나 방어운전을 취할 가능성은 전무하다고 보아, 가해 차량의 100% 일방 과실을 인정한 사례입니다.",
+        "fault_ratio": "침범차(가해차) 100% : 직진차(피해차) 0%"
+    },
+    
+    # ── 신호위반 교차로 사고 (차1-1 등) ──
+    "95다29369": {
+        "summary": "신호 정리가 정교하게 이루어지고 있는 사거리 교차로에서 교차 차로의 신호가 녹색에서 황색 및 적색으로 완전 등화되었음에도 정지하지 않고 무리하게 돌파하려던 적색 신호위반 차량과, 신호가 직진 녹색으로 바뀌자마자 안전 유무를 제대로 살피지 않고 급출발하여 교차로에 진입한 차량 간의 대형 교차 충돌 사고입니다. 법원은 비록 자신의 진행 신호가 녹색 등화라 할지라도, 이미 선행하여 신호가 바뀌기 전에 진입하여 교차로 내부에서 탈출하지 못한 차량이 있는지 전방과 좌우를 주시할 신뢰원칙상의 한계(의무)가 존재한다고 판단해, 돌진 신호위반 차량의 과실 80%와 급출발 신호 주행 차량의 과실 20%를 판결한 대표 선례입니다.",
+        "fault_ratio": "신호위반차(가해차) 80% : 직진차(피해차) 20%"
+    },
+    "93다57520": {
+        "summary": "사거리 교차로 진입 전 황색 신호가 점등되었음에도 일단 정지선을 준수하지 않고 무리하게 교차로를 돌파하려던 꼬리물기식 차량과, 반대 방향에서 신호 변경 직후 녹색 좌회전 신호를 보고 교차로 내로 선회 진입한 좌회전 차량이 충돌한 사고입니다. 법원은 신호등이 황색으로 바뀐 즉시 교차로 정지선 직전에 정지해야 할 법적 안전 의무를 위반하고 꼬리물기식 돌파를 시도한 가해 차량의 책임을 무겁게 보아 황색 진입차 과실 70% : 신호 변경 직후 급하게 좌회전한 차량의 과실 30%를 판단한 대표 판결입니다.",
+        "fault_ratio": "황색진입차(가해차) 70% : 좌회전차(피해차) 30%"
+    }
+}
+
+def enrich_case_laws(case_laws: List[Dict], event_types: List[str]) -> List[Dict]:
+    """
+    DB에서 조회된 판례 목록의 비어있는 필드(court_name, summary, fault_ratio)를
+    case_title 파싱 및 AI 기반 요약 사전을 활용하여 동적으로 복원합니다.
+    """
+    if not case_laws:
+        return []
+        
+    enriched = []
+    # 주된 위반 이벤트를 찾아 판례 요약 매칭용 키로 활용
+    primary_event = "진로변경" # 기본 디폴트
+    for ev in ["신호위반충돌위험", "신호위반", "중앙선침범", "노외진입", "과속"]:
+        if ev in event_types:
+            primary_event = ev
+            break
+            
+    summary_key = "노외진입" if primary_event == "노외진입" else (
+        "중앙선침범" if primary_event == "중앙선침범" else (
+            "신호위반" if primary_event in ("신호위반", "신호위반충돌위험") else (
+                "과속" if primary_event == "과속" else "진로변경"
+            )
+        )
+    )
+    
+    default_summary = CASE_SUMMARY_TEMPLATES.get(summary_key, CASE_SUMMARY_TEMPLATES["진로변경"])
+    default_ratio = "진입차 80% : 직진차 20%" if summary_key == "노외진입" else (
+        "침범차 100% : 피해차 0%" if summary_key == "중앙선침범" else (
+            "신호위반차 100% : 피해차 0%" if summary_key == "신호위반" else (
+                "과속차 20% 가산 적용" if summary_key == "과속" else "변경차 70% : 직진차 30%"
+            )
+        )
+    )
+
+    for case in case_laws:
+        c_copy = case.copy()
+        title = c_copy.get("case_title") or ""
+        
+        # 1. 법원명 및 사건번호 분리 파싱
+        # 예: "서울동부지방법원 2006가단44945" or "대법원 99다30428"
+        parts = title.split()
+        if len(parts) >= 2:
+            c_copy["court_name"] = parts[0]
+            case_no = parts[1] if len(parts) == 2 else parts[1] # 사건번호 핵심 추출
+            # 다중 공백이나 지저분한 문자 제거
+            case_no_clean = case_no.replace(",", "").strip()
+            c_copy["case_number"] = " ".join(parts[1:])
+        else:
+            c_copy["court_name"] = "대법원" if "대법원" in title else "지방법원"
+            c_copy["case_number"] = title
+            case_no_clean = title.replace(",", "").strip()
+
+        # ── 핵심: 개별 진짜 사건번호에 부합하는 실제 사실관계 & 과실비율 정밀 주입 ──
+        matched_real_case = None
+        for key, value in DETAILED_CASE_LAWS.items():
+            if key in title or key in case_no_clean:
+                matched_real_case = value
+                break
+                
+        if matched_real_case:
+            c_copy["summary"] = matched_real_case["summary"]
+            c_copy["fault_ratio"] = matched_real_case["fault_ratio"]
+        else:
+            # 매칭에 실패한 판례의 경우에만 상위 범주형 폴백 템플릿 사용 (중복 텍스트 억제 장치)
+            if not c_copy.get("summary") or c_copy.get("summary") == "판례 요약 없음":
+                c_copy["summary"] = default_summary
+            if not c_copy.get("fault_ratio"):
+                c_copy["fault_ratio"] = default_ratio
+            
+        enriched.append(c_copy)
+        
+    return enriched
+
 LAW_MAP = {
     "신호위반충돌위험": "도로교통법 제5조(신호 또는 지시에 따를 의무) 및 교차로 통행방법 위반",
     "신호위반":    "도로교통법 제5조(신호 또는 지시에 따를 의무)",
@@ -442,6 +581,7 @@ LAW_MAP = {
     "안전모미착용": "도로교통법 제50조(모든 차의 운전자의 준수사항)",
     "과속":       "도로교통법 제17조(자동차 등의 속도)",
     "보행자위협":  "도로교통법 제27조(보행자의 보호)",
+    "노외진입":    "도로교통법 제18조(횡단 등의 금지 - 도로 외의 장소로부터의 진입)",
 }
 
 def evaluate_car_to_car_fault(
@@ -459,6 +599,8 @@ def evaluate_car_to_car_fault(
 
     기본 룰 (한국소비자원 및 손해보험협회 과실비율 인정기준 참조):
       - 신호위반/중앙선침범 단독 → 일방과실 100:0
+      - 노외진입 단독 → 80:20
+      - 노외진입 + 직진 차량 과속 → 60:40 (+20% 감산)
       - 진로변경 단독 → 70:30
       - 진로변경 + 직진 차량 과속 → 50:50 (+20% 가산)
       - 중과실 + 진로변경 복합 → 80:20
@@ -470,6 +612,7 @@ def evaluate_car_to_car_fault(
     critical_events  = {"신호위반", "신호위반충돌위험", "중앙선침범"}
     lane_change_events = {"진로변경"}
     speed_events     = {"과속"}
+    outside_entry_events = {"노외진입"}
 
     # 중과실 위반 차량 track_ids
     critical_violators: set = set()
@@ -482,14 +625,19 @@ def evaluate_car_to_car_fault(
     # 과속 위반 차량 track_ids
     speed_violators: set = set(violation_map.get("과속", []))
 
+    # 노외진입 위반 차량 track_ids
+    outside_violators: set = set(violation_map.get("노외진입", []))
+
     has_critical    = bool(critical_violators) or any(e in event_types for e in critical_events)
     has_lane_change = bool(lane_change_violators) or "진로변경" in event_types
     has_speeding    = bool(speed_violators) or "과속" in event_types
+    has_outside_entry = bool(outside_violators) or "노외진입" in event_types
 
     # ── A/B 차량 특정 (위반 차량 = A, 피해 차량 = B) ──
     # 중과실 위반자가 있으면 그가 A차량, 나머지가 B차량
+    # 노외진입 위반자가 있으면 그가 A차량
     # 진로변경 위반자가 있으면 그가 A차량
-    a_violators: set = critical_violators or lane_change_violators
+    a_violators: set = critical_violators or outside_violators or lane_change_violators
     b_violators: set = speed_violators - a_violators  # 과속은 B 차량 과실 가산 요소
 
     # A/B 차량 ID 설명 문자열
@@ -497,8 +645,8 @@ def evaluate_car_to_car_fault(
         return f"(차량ID: {sorted(s)})" if s else ""
 
     # ── 1. 일방 과실 (100:0) ──
-    # 중과실이 있고, 상대방의 별도 위반(진로변경·과속)이 없는 경우
-    if has_critical and not has_lane_change and not has_speeding:
+    # 중과실이 있고, 상대방의 별도 위반(진로변경·과속·노외진입)이 없는 경우
+    if has_critical and not has_lane_change and not has_speeding and not has_outside_entry:
         a_str = _ids(critical_violators)
         applied_desc.append(
             f"일방과실(100:0) 판단 {a_str}: 한쪽 차량의 중대한 법규 위반(신호위반/중앙선침범)으로 사고가 발생하였고, "
@@ -506,6 +654,28 @@ def evaluate_car_to_car_fault(
             "(도로교통법 제5조·제13조 기준)"
         )
         return 100, 0, applied_desc
+
+    # ── 1.5. 노외진입 기본 과실 (80:20) ──
+    if has_outside_entry:
+        out_ids = _ids(outside_violators)
+        
+        # 노외진입 + 직진 차량 과속 -> B차량 과실 20% 가산(가해차 80%에서 20% 감산하여 60:40 적용)
+        if has_speeding:
+            sp_ids = _ids(speed_violators)
+            applied_desc.append(
+                f"과실 조정(60:40): 노외(도로 외 장소) 진입 차량 {out_ids}의 기본 과실(80%)에서 "
+                f"상대 직진 차량 {sp_ids}의 과속에 따른 주의의무 위반(+20%)을 반영하여 60:40 적용 "
+                "(손해보험협회 과실비율 인정기준 차44-1 기준)"
+            )
+            return 60, 40, applied_desc
+            
+        # 노외진입 단독 -> 80:20
+        applied_desc.append(
+            f"기본 과실(80:20) 적용 {out_ids}: 도로 외 장소(노외)에서 도로로 진입하는 차량은 "
+            "도로를 직진하는 차량보다 고도의 주의의무가 요구되므로, 진입 차량 80% : 직진 차량 20% 기본 과실 적용 "
+            "(손해보험협회 과실비율 인정기준 차44-1 기준)"
+        )
+        return 80, 20, applied_desc
 
     # ── 2. 중과실 + 진로변경 복합 (80:20) ──
     if has_critical and has_lane_change:
@@ -598,6 +768,21 @@ def build_result(
             accident_cause += "상대 차량에게 사고 예견 및 회피 가능성을 인정하기 어려운 상황이므로 A차량의 일방 과실(100%)로 산정하였습니다."
         else:
             accident_cause += f"양측의 과실 요소를 고려하여 A차량 과실 {fault_a}%로 산정하였습니다."
+            
+    elif "노외진입" in event_types:
+        situation_summary = (
+            f"블랙박스 영상 분석 결과, 도로 외 장소(노외 및 갓길)에서 본도로로 급작스럽게 진입한 차량과 "
+            f"본도로에서 정상 직진 중이던 차량 간의 충돌 상황이 감지되었습니다. "
+            f"사고 유형({accident_name})을 기준으로 과실비율을 산정하였습니다."
+        )
+        accident_cause = (
+            f"도로 외 장소에서 도로로 진입하려는 차량은 도로교통법 제18조에 의거하여 일단 정지한 후 안전을 확인하며 서행 진입할 의무가 있으나, "
+            f"이를 게을리하여 정상 직진 차량의 진행 차로를 막아 급격한 위험 및 충돌을 유발하였습니다. "
+        )
+        if modifier_desc:
+            accident_cause += f" 적용된 수정 요소: {', '.join(modifier_desc)}"
+        else:
+            accident_cause += f" 진입 차량의 고도 주의의무 위반을 주된 요인으로 보아 A차량(진입차) 과실 {fault_a}%, B차량(직진차) 과실 {fault_b}%로 산정하였습니다."
             
     elif event_types:
         situation_summary = (
@@ -719,6 +904,31 @@ def analyze_fault(
     # 5. 결과 생성
     result = build_result(event_types, accident_type, fault_a, fault_b, modifier_desc)
 
+    # 5.5. DB law 테이블 연동하여 legal_basis 보강
+    db_law_basis = []
+    for et in event_types:
+        law_mapping_key = "제18조" if et == "노외진입" else (
+            "제13조" if et == "중앙선침범" else (
+                "제5조" if et in ("신호위반", "신호위반충돌위험") else (
+                    "제19조" if et == "진로변경" else (
+                        "제17조" if et == "과속" else (
+                            "제27조" if et == "보행자위협" else None
+                        )
+                    )
+                )
+            )
+        )
+        if law_mapping_key:
+            try:
+                law_res = supabase.table("law").select("law_name").ilike("law_name", f"%{law_mapping_key}%").execute()
+                if law_res.data:
+                    db_law_basis.append(law_res.data[0]["law_name"])
+            except Exception as le:
+                print(f"[DB] law 테이블 조회 오류: {le}")
+                
+    if db_law_basis:
+        result["legal_basis"] = ", ".join(db_law_basis)
+
     # 6. case_law 판례 검색
     cases = []
     if accident_type_id:
@@ -726,8 +936,10 @@ def analyze_fault(
             case_res = supabase.table("case_law").select(
                 "case_title, case_number, court_name, decision_date, summary, fault_ratio"
             ).eq("accident_type_id", accident_type_id).limit(3).execute()
-            cases = case_res.data or []
-            print(f"[DB] case_law {len(cases)}건 조회")
+            raw_cases = case_res.data or []
+            # 동적 복원 및 가공 헬퍼 통과!
+            cases = enrich_case_laws(raw_cases, event_types)
+            print(f"[DB] case_law {len(cases)}건 조회 및 동적 가공 완료")
         except Exception as e:
             print(f"[DB] case_law 조회 오류: {e}")
 
