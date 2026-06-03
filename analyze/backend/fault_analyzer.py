@@ -935,7 +935,7 @@ def analyze_fault(
         try:
             case_res = supabase.table("case_law").select(
                 "case_title, case_number, court_name, decision_date, summary, fault_ratio"
-            ).eq("accident_type_id", accident_type_id).limit(3).execute()
+            ).eq("accident_type_id", accident_type_id).execute()
             raw_cases = case_res.data or []
             # 동적 복원 및 가공 헬퍼 통과!
             cases = enrich_case_laws(raw_cases, event_types)
