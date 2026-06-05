@@ -549,9 +549,20 @@ def analyze_video(
     video_id = None
     if supabase:
         try:
+            # 같은 사용자의 중복 파일명 방지: 이미 동일 이름 존재 시 번호 추가
+            upload_name = file.filename
+            if user_id:
+                base, ext = os.path.splitext(upload_name)
+                existing = supabase.table("video_record").select("original_name").eq("user_id", user_id).execute()
+                existing_names = {r["original_name"] for r in (existing.data or [])}
+                counter = 1
+                while upload_name in existing_names:
+                    upload_name = f"{base}({counter}){ext}"
+                    counter += 1
+
             vr_res = supabase.table("video_record").insert({
                 "user_id":       user_id,
-                "original_name": file.filename,
+                "original_name": upload_name,
                 "file_path":     temp_path,
                 "status":        "분석중",
             }).execute()
@@ -755,6 +766,39 @@ def get_chat_history(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@app.delete("/api/chat/history")
+def delete_chat_history(result_id: int, authorization: Optional[str] = Header(None)):
+    """특정 분석 건의 채팅 기록만 삭제."""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+    try:
+        token = (authorization or "").replace("Bearer ", "")
+        user = supabase.auth.get_user(token)
+        user_id = user.user.id if user and user.user else None
+        if not user_id:
+            raise HTTPException(status_code=401, detail="인증되지 않은 사용자입니다.")
+
+        # 해당 result_id가 본인 것인지 확인
+        res = supabase.table("analysis_result").select("*, video_record(user_id)").eq("result_id", result_id).single().execute()
+        if not res.data:
+            raise HTTPException(status_code=404, detail="결과를 찾을 수 없습니다.")
+        video_record = res.data.get("video_record")
+        if not video_record or video_record.get("user_id") != user_id:
+            raise HTTPException(status_code=403, detail="권한이 없습니다.")
+
+        del_res = (supabase.table("chat_history")
+                   .delete()
+                   .eq("result_id", result_id)
+                   .eq("user_id", user_id)
+                   .execute())
+        deleted_count = len(del_res.data) if del_res.data else 0
+        return {"message": f"채팅 기록 {deleted_count}건이 삭제되었습니다."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.delete("/api/results/{result_id}")
 def delete_result(result_id: int, authorization: Optional[str] = Header(None)):
     """특정 분석 결과 및 연관 데이터(video_record 등) 삭제."""
@@ -852,10 +896,19 @@ def rename_result(result_id: int, req: RenameRequest, authorization: Optional[st
 
         video_id = video_record.get("video_id")
         if video_id:
-            # 확장자 부분은 유지하고 파일명 변경
             orig_name = video_record.get("original_name", "")
             ext = os.path.splitext(orig_name)[1] if orig_name else ".mp4"
-            final_name = req.new_name if req.new_name.endswith(ext) else f"{req.new_name}{ext}"
+            base_name = req.new_name if req.new_name.endswith(ext) else f"{req.new_name}{ext}"
+
+            # 같은 사용자의 다른 영상과 이름 중복 방지
+            existing = supabase.table("video_record").select("original_name").eq("user_id", user_id).neq("video_id", video_id).execute()
+            existing_names = {r["original_name"] for r in (existing.data or [])}
+            final_name = base_name
+            counter = 1
+            name_base = req.new_name if not req.new_name.endswith(ext) else req.new_name[:-len(ext)]
+            while final_name in existing_names:
+                final_name = f"{name_base}({counter}){ext}"
+                counter += 1
 
             supabase.table("video_record").update({"original_name": final_name}).eq("video_id", video_id).execute()
 

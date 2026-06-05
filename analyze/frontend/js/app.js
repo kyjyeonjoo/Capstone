@@ -90,9 +90,13 @@ document.addEventListener('DOMContentLoaded', () => {
             // Automatically select active accident in chat room when opening chat view
             if (targetView === 'chat-view') {
                 const selectEl = document.getElementById('chatReportSelect');
+                const delBtn = document.getElementById('deleteChatHistoryBtn');
                 if (selectEl && window.currentAccidentData?.result_id) {
                     selectEl.value = window.currentAccidentData.result_id;
                     loadChatHistory(window.currentAccidentData.result_id);
+                }
+                if (delBtn && selectEl) {
+                    delBtn.style.display = selectEl.value ? 'inline-block' : 'none';
                 }
             }
         });
@@ -635,7 +639,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (executeAnalysisBtn) {
         executeAnalysisBtn.addEventListener('click', async () => {
             if (!selectedFile) {
-                switchView('result-view');
+                showToast('분석할 영상을 먼저 업로드해 주세요.', 'error');
                 return;
             }
 
@@ -1179,10 +1183,46 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Dropdown selection change listener
         const chatReportSelect = document.getElementById('chatReportSelect');
+        const deleteChatHistoryBtn = document.getElementById('deleteChatHistoryBtn');
+
+        function updateDeleteChatBtn() {
+            if (deleteChatHistoryBtn && chatReportSelect) {
+                deleteChatHistoryBtn.style.display = chatReportSelect.value ? 'inline-block' : 'none';
+            }
+        }
+
         if (chatReportSelect) {
             chatReportSelect.addEventListener('change', async (e) => {
                 const resultId = e.target.value;
+                updateDeleteChatBtn();
                 await loadChatHistory(resultId);
+            });
+        }
+
+        if (deleteChatHistoryBtn) {
+            deleteChatHistoryBtn.addEventListener('click', async () => {
+                const resultId = chatReportSelect ? chatReportSelect.value : null;
+                if (!resultId) return;
+                if (!confirm('이 사건의 채팅 기록을 모두 삭제하시겠습니까?\n삭제 후 복구할 수 없습니다.')) return;
+
+                try {
+                    const token = await getValidToken();
+                    const res = await fetch(`/api/chat/history?result_id=${resultId}`, {
+                        method: 'DELETE',
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    const resData = await res.json();
+                    if (!res.ok) throw new Error(resData.detail || '채팅 기록 삭제 실패');
+
+                    showToast('채팅 기록이 삭제되었습니다.', 'success');
+                    // 채팅창 초기화
+                    const chatMessages = document.querySelector('.chat-messages');
+                    if (chatMessages) {
+                        chatMessages.innerHTML = `<div class="message bot">채팅 기록이 삭제되었습니다. 새로운 질문을 입력해 주세요.</div>`;
+                    }
+                } catch (err) {
+                    showToast(err.message, 'error');
+                }
             });
         }
     }
