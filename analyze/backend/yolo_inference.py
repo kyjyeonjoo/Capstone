@@ -3,9 +3,10 @@ import cv2
 import uuid
 import os
 import warnings
+import math
 
 # PyTorch 2.4+의 autocast FutureWarning 숨김 처리
-warnings.filterwarnings("ignore", category=FutureWarning, message=".*torch\.cuda\.amp\.autocast.*")
+warnings.filterwarnings("ignore", category=FutureWarning, message=r".*torch\.cuda\.amp\.autocast.*")
 warnings.filterwarnings("ignore", category=FutureWarning, module="models.common")
 
 # ──────────────────────────────────────────────────────────────────
@@ -26,6 +27,92 @@ CLASS_NAME_MAP = {
     "helmet":       "helmet",
     "no_helmet":    "no_helmet",
 }
+
+VEHICLE_TYPES = {"car", "bus", "truck", "motorcycle"}
+
+def get_base_object_type(object_type):
+    if object_type.startswith("[") and "]" in object_type:
+        return object_type.split("]", 1)[1].strip()
+    return object_type
+
+def reconcile_vehicle_track_ids(records, fps, max_gap_seconds=2.5):
+    """Merge vehicle track fragments that were split by brief occlusion or scale change."""
+    vehicle_tracks = {}
+    for record in records:
+        if get_base_object_type(record.get("object_type", "")) not in VEHICLE_TYPES:
+            continue
+        track_id = record.get("track_id")
+        if track_id is None:
+            continue
+        vehicle_tracks.setdefault(track_id, []).append(record)
+
+    fragments = []
+    for track_id, track_records in vehicle_tracks.items():
+        ordered = sorted(track_records, key=lambda item: item.get("frame", 0))
+        first = ordered[0]
+        last = ordered[-1]
+
+        def metrics(record):
+            width = max(1, record.get("bbox_x2", 0) - record.get("bbox_x1", 0))
+            height = max(1, record.get("bbox_y2", 0) - record.get("bbox_y1", 0))
+            return (
+                (record.get("bbox_x1", 0) + record.get("bbox_x2", 0)) / 2,
+                (record.get("bbox_y1", 0) + record.get("bbox_y2", 0)) / 2,
+                width * height,
+            )
+
+        fragments.append(
+            {
+                "track_id": track_id,
+                "records": ordered,
+                "start_frame": first.get("frame", 0),
+                "end_frame": last.get("frame", 0),
+                "start": metrics(first),
+                "end": metrics(last),
+            }
+        )
+
+    fragments.sort(key=lambda item: item["start_frame"])
+    parent = {fragment["track_id"]: fragment["track_id"] for fragment in fragments}
+    max_gap_frames = max(1, int(fps * max_gap_seconds))
+
+    for current_index, current in enumerate(fragments):
+        best_previous = None
+        best_score = float("inf")
+        start_x, start_y, start_area = current["start"]
+
+        for previous in fragments[:current_index]:
+            previous_root = parent[previous["track_id"]]
+            gap = current["start_frame"] - previous["end_frame"]
+            if gap <= 0 or gap > max_gap_frames:
+                continue
+
+            end_x, end_y, end_area = previous["end"]
+            center_distance = math.hypot(start_x - end_x, start_y - end_y)
+            scale = max(40.0, math.sqrt(end_area), math.sqrt(start_area))
+            normalized_distance = center_distance / scale
+            area_change = abs(math.log(max(start_area, 1) / max(end_area, 1)))
+
+            # A short gap may include a large apparent-size change near impact.
+            score = normalized_distance + (area_change * 0.35) + (gap / max_gap_frames)
+            if normalized_distance <= 2.5 and area_change <= 2.2 and score < best_score:
+                best_score = score
+                best_previous = previous_root
+
+        if best_previous is not None and best_score <= 3.2:
+            parent[current["track_id"]] = best_previous
+
+    def root(track_id):
+        while parent.get(track_id, track_id) != track_id:
+            track_id = parent[track_id]
+        return track_id
+
+    for record in records:
+        track_id = record.get("track_id")
+        if track_id in parent:
+            record["track_id"] = root(track_id)
+
+    return records
 
 def compute_iou(boxA, boxB):
     xA = max(boxA[0], boxB[0])
@@ -390,5 +477,14 @@ def analyze_video_with_yolo(video_path, weights_paths, video_id="WEB_UP_001"):
         processed_count += 1
         
     cap.release()
+    extracted_records = reconcile_vehicle_track_ids(
+        extracted_records,
+        fps=float(orig_fps),
+    )
     print(f"[YOLO] 분석 완료 — 처리 프레임: {processed_count}, 총 탐지 기록 수: {len(extracted_records)}")
-    return {"total_frames": processed_count, "records": extracted_records}
+    return {
+        "total_frames": processed_count,
+        "records": extracted_records,
+        "fps": float(orig_fps),
+        "total_video_frames": total_video_frames
+    }

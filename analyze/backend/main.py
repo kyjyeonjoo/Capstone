@@ -31,7 +31,7 @@ if not OPENROUTER_API_KEY:
 
 # yolo_inference.py에서 로직 가져오기
 from yolo_inference import analyze_video_with_yolo
-from fault_analyzer import analyze_fault, enrich_case_laws
+from fault_analyzer import analyze_fault, enrich_case_laws, fetch_law_api_cases
 
 app = FastAPI()
 app.add_middleware(
@@ -505,6 +505,11 @@ def get_result_detail(result_id: int):
                 case_laws = enrich_case_laws(raw_cases, detected_events)
             except Exception as e:
                 print(f"[DB] case_law 조회 오류: {e}")
+        if not case_laws and detected_events:
+            internal_events = list(detected_events)
+            if "교차로진입" in detected_events and "진로변경" in detected_events:
+                internal_events.append("측면합류충돌위험")
+            case_laws = fetch_law_api_cases(internal_events, limit=3)
 
         # 5. 프론트엔드가 요구하는 포맷으로 필드 병합 및 바인딩
         data["detected_events"] = detected_events
@@ -579,9 +584,13 @@ def analyze_video(
         )
 
         # duration 업데이트
+        fps = yolo_result.get("fps", 5.0)
+        total_video_frames = yolo_result.get("total_video_frames", yolo_result["total_frames"] * (fps / 5.0))
+        duration = round(total_video_frames / max(fps, 0.1), 3)
+
         if supabase and video_id:
             supabase.table("video_record").update({
-                "duration": yolo_result["total_frames"] / 5.0,
+                "duration": duration,
                 "status":   "판단중",
             }).eq("video_id", video_id).execute()
 
@@ -591,6 +600,7 @@ def analyze_video(
             video_id     = video_id or -1,
             total_frames = yolo_result["total_frames"],
             records      = yolo_result["records"],
+            fps          = fps,
         )
 
         # 완료 상태 업데이트

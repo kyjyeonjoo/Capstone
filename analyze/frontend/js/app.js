@@ -720,7 +720,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             <p>${data.situation_summary}</p>
                             <p>${data.accident_cause || ''}</p>
                             <ul>
-                                <li><strong>감지된 위반:</strong> ${(data.detected_events || []).join(', ') || '없음'}</li>
+                                <li><strong>감지된 사고 요소:</strong> ${(data.detected_events || []).join(', ') || '없음'}</li>
                                 <li><strong>사고 유형:</strong> ${data.accident_type_name || '불명확'}</li>
                                 <li><strong>신뢰도:</strong> ${data.confidence_level || '-'}</li>
                             </ul>
@@ -736,9 +736,10 @@ document.addEventListener('DOMContentLoaded', () => {
                                 html += `
                                     <hr style="border:0; border-top:1px solid #e2e8f0; margin:1rem 0;">
                                     <p><strong>[관련 판례] ${c.case_title || ''}</strong></p>
-                                    <p>법원: ${c.court_name || ''} | 선고일: ${c.decision_date || ''}</p>
+                                    <p>사건번호: ${c.case_number || '-'} | 법원: ${c.court_name || ''} | 선고일: ${c.decision_date || ''}</p>
                                     <p>${c.summary || '판례 요약 없음'}</p>
                                     ${c.fault_ratio ? `<p>과실비율: ${c.fault_ratio}</p>` : ''}
+                                    ${c.source_url ? `<p><a href="${c.source_url}" target="_blank" rel="noopener noreferrer">국가법령정보센터에서 판례 원문 보기</a></p>` : ''}
                                 `;
                             });
                         } else {
@@ -987,7 +988,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     <p>${data.summary || '분석 요약 정보가 없습니다.'}</p>
                     <p>${data.accident_cause || ''}</p>
                     <ul>
-                        <li><strong>감지된 위반:</strong> ${detectedEventsText}</li>
+                        <li><strong>감지된 사고 요소:</strong> ${detectedEventsText}</li>
                         <li><strong>사고 유형:</strong> ${data.accident_type_name || '불명확'}</li>
                         <li><strong>신뢰도:</strong> ${confidenceText}</li>
                     </ul>
@@ -1031,9 +1032,10 @@ document.addEventListener('DOMContentLoaded', () => {
                         html += `
                             <hr style="border:0; border-top:1px solid #e2e8f0; margin:1rem 0;">
                             <p><strong>[관련 판례] ${c.case_title || ''}</strong></p>
-                            <p>법원: ${c.court_name || ''} | 선고일: ${c.decision_date || ''}</p>
+                            <p>사건번호: ${c.case_number || '-'} | 법원: ${c.court_name || ''} | 선고일: ${c.decision_date || ''}</p>
                             <p>${c.summary || '판례 요약 없음'}</p>
                             ${c.fault_ratio ? `<p>과실비율: ${c.fault_ratio}</p>` : ''}
+                            ${c.source_url ? `<p><a href="${c.source_url}" target="_blank" rel="noopener noreferrer">국가법령정보센터에서 판례 원문 보기</a></p>` : ''}
                         `;
                     });
                 } else {
