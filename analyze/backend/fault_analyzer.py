@@ -332,6 +332,96 @@ def detect_events(supabase: Client, video_id: int, records: List[Dict]) -> Tuple
                         "description": f"차량(ID:{track_id})이 제한 속도(80km/h)를 초과하여 과속 주행함 감지 (추정 속도: {max_speed_kmh:.1f}km/h, 프레임 {max_frame})"
                     }
 
+    # ── (8) 좌회전 및 교차로진입 감지 (전체 프레임 데이터 분석) ──
+    # 1) 교차로진입 감지
+    # 비디오에 crosswalk 또는 stopline이 검출되었고, 차량이 2대 이상 감지된 경우
+    has_crosswalk_or_stopline = any(get_base_type(rec.get("object_type")) in ("crosswalk", "stopline", "corner_stopline") for rec in records)
+    has_multiple_vehicles = len(track_positions) >= 2
+    
+    # 2) 차량 좌회전성 진행(방향 전환) 감지
+    import math
+    detected_turn_track = None
+    for track_id, pos_list in track_positions.items():
+        if len(pos_list) < 8:
+            continue
+        pos_list.sort(key=lambda x: x[0])
+        
+        # 전체 변위(displacement)가 최소 50픽셀 이상이어야 노이즈가 아닌 실제 이동 차량으로 간주
+        start_pos = pos_list[0]
+        end_pos = pos_list[-1]
+        disp_dist = math.sqrt((end_pos[1] - start_pos[1])**2 + (end_pos[2] - start_pos[2])**2)
+        if disp_dist < 50.0:
+            continue
+            
+        # 3프레임 이동 평균 스무딩 적용
+        smoothed = []
+        for idx in range(len(pos_list)):
+            window = pos_list[max(0, idx-1):min(len(pos_list), idx+2)]
+            avg_cx = sum(w[1] for w in window) / len(window)
+            avg_cy = sum(w[2] for w in window) / len(window)
+            smoothed.append((pos_list[idx][0], avg_cx, avg_cy))
+            
+        # 진행 방향 각도 리스트 계산
+        angles = []
+        for idx in range(len(smoothed) - 3):
+            p1 = smoothed[idx]
+            p2 = smoothed[idx+3]
+            dx = p2[1] - p1[1]
+            dy = p2[2] - p1[2]
+            step_dist = math.sqrt(dx**2 + dy**2)
+            if step_dist > 5.0:  # 의미 있는 이동 거리일 때만 각도 계산
+                angle = math.degrees(math.atan2(dy, dx))
+                angles.append(angle)
+                
+        if len(angles) < 5:
+            continue
+            
+        # 궤적상 최대 각도 변화 계산 (wrap-around 보정)
+        max_angle_diff = 0.0
+        for i in range(len(angles)):
+            for j in range(i+1, len(angles)):
+                diff = (angles[j] - angles[i] + 180) % 360 - 180
+                if abs(diff) > max_angle_diff:
+                    max_angle_diff = abs(diff)
+                    
+        if max_angle_diff > 25.0:
+            detected_turn_track = track_id
+            _record_violator("좌회전", track_id)
+            if "좌회전" not in seen_events:
+                seen_events["좌회전"] = {
+                    "video_id": video_id,
+                    "event_type": "좌회전",
+                    "event_time": round(pos_list[len(pos_list)//2][0] / 5.0, 3),
+                    "severity": "NORMAL",
+                    "description": f"차량(ID:{track_id})의 교차로 내 좌회전성/방향 전환 진행 감지 (최대 조향각 변화: {max_angle_diff:.1f}도)"
+                }
+            break
+
+    if has_crosswalk_or_stopline and has_multiple_vehicles:
+        # 비디오 전체 시간 중 중간 지점에 교차로 진입 이벤트 등록
+        mid_frame = records[len(records)//2].get("frame", 0) if records else 0
+        if "교차로진입" not in seen_events:
+            # 좌회전 차량이 있으면 그 차량을 위반자로 기록, 없으면 첫 번째 움직이는 차량 기록
+            violator_track = detected_turn_track
+            if violator_track is None and track_positions:
+                violator_track = list(track_positions.keys())[0]
+                
+            _record_violator("교차로진입", violator_track)
+            seen_events["교차로진입"] = {
+                "video_id": video_id,
+                "event_type": "교차로진입",
+                "event_time": round(mid_frame / 5.0, 3),
+                "severity": "NORMAL",
+                "description": f"교차로 구성 요소(횡단보도/정지선) 감지 및 교차 진입 상황 판별 (차량 ID: {violator_track})"
+            }
+    # ── 교차로/좌회전 상황에서 중앙선 침범 오감지 억제 ──
+    if "교차로진입" in seen_events or "좌회전" in seen_events:
+        if "중앙선침범" in seen_events:
+            print("[조정] 교차로/좌회전 상황이므로 중앙선침범 이벤트를 제외합니다.")
+            del seen_events["중앙선침범"]
+            if "중앙선침범" in violation_track_map:
+                del violation_track_map["중앙선침범"]
+
     # DB 저장 (DB의 event_type CHECK 제약조건 우회를 위해 정제)
     if seen_events:
         db_payload = []
@@ -364,11 +454,23 @@ EVENT_TO_KEYWORDS = {
     "안전모미착용": ["이륜차", "오토바이", "안전모"],
     "과속":       ["과속", "속도위반", "제한속도"],
     "보행자위협":  ["보행자", "횡단보도"],
+    "좌회전":     ["좌회전", "좌회전하는"],
+    "교차로진입":  ["교차로", "사거리", "삼거리"],
 }
 
-PRIORITY_ORDER = ["신호위반충돌위험", "신호위반", "중앙선침범", "노외진입", "과속", "보행자위협", "진로변경", "안전모미착용"]
+PRIORITY_ORDER = ["신호위반충돌위험", "신호위반", "중앙선침범", "노외진입", "과속", "보행자위협", "좌회전", "교차로진입", "진로변경", "안전모미착용"]
 
-def match_accident_type(supabase: Client, event_types: List[str]) -> Optional[Dict]:
+def is_signal_controlled(accident: Dict) -> bool:
+    desc = accident.get("description", "") or ""
+    name = accident.get("accident_name", "") or ""
+    combined = desc + name
+    if "교통정리가 이루어지고 있지 않" in combined or "교통정리가 없는" in combined or "신호기가 없는" in combined or "신호기 없는" in combined:
+        return False
+    if any(sig in combined for sig in ["신호등", "녹색신호", "적색신호", "황색신호", "화살표 신호", "좌회전 신호", "우회전 신호"]):
+        return True
+    return False
+
+def match_accident_type(supabase: Client, event_types: List[str], records: List[Dict]) -> Optional[Dict]:
     """
     accident_type 전체를 가져와서 Python에서 직접 키워드 매칭.
     """
@@ -380,9 +482,19 @@ def match_accident_type(supabase: Client, event_types: List[str]) -> Optional[Di
         print("[매칭] accident_type 테이블이 비어있음")
         return None
 
+    # 신호등 감지 여부 파악
+    has_signals = any(get_base_type(rec.get("object_type")) in ("red", "green_light", "yellow_light", "left_light") for rec in records)
+    
+    # 신호 유무에 따라 정렬 (has_signals가 False이면 unsignaled 타입 우선)
+    def sort_key(acc):
+        is_sig = is_signal_controlled(acc)
+        return 0 if (is_sig == has_signals) else 1
+
+    all_types_sorted = sorted(all_types, key=sort_key)
+
     if not event_types:
-        print(f"[매칭] 이벤트 없음 → 기본값 사용: {all_types[0]['accident_name']}")
-        return all_types[0]
+        print(f"[매칭] 이벤트 없음 → 기본값 사용: {all_types_sorted[0]['accident_name']}")
+        return all_types_sorted[0]
 
     # 우선순위 순서대로 매칭 시도
     for event in PRIORITY_ORDER:
@@ -391,7 +503,7 @@ def match_accident_type(supabase: Client, event_types: List[str]) -> Optional[Di
 
         keywords = EVENT_TO_KEYWORDS.get(event, [])
 
-        for accident in all_types:
+        for accident in all_types_sorted:
             desc = accident.get("description", "") or ""
             name = accident.get("accident_name", "") or ""
             combined = desc + name
@@ -403,8 +515,8 @@ def match_accident_type(supabase: Client, event_types: List[str]) -> Optional[Di
                 return accident
 
     # 매칭 실패 시 기본값
-    print(f"[매칭] 매칭 실패 → 기본값 사용: {all_types[0]['accident_name']}")
-    return all_types[0]
+    print(f"[매칭] 매칭 실패 → 기본값 사용: {all_types_sorted[0]['accident_name']}")
+    return all_types_sorted[0]
 
 
 # ──────────────────────────────────────────────────────────
@@ -462,7 +574,9 @@ CASE_SUMMARY_TEMPLATES = {
     "중앙선침범": "황색 실선으로 그어진 중앙선이 엄격히 규정된 도로에서 대향 방향으로 마주 오던 차량 중 일방이 부주의하게 중앙선을 전적으로 침범하여 반대 차선에서 정상 운행 중이던 대향 차량과 정면으로 충돌한 사고입니다. 법원은 반대 방향에서 정상 속도로 진행하던 차량 입장에서는 상대방의 급작스러운 중앙선 침범 및 역주행 행위를 예견하거나 회피하기가 사실상 불가능하다는 점을 명확히 판시하여, 중앙선 침범 차량에게 100%의 일방적 책임을 지우는 전원합의체 판결을 내린 대표적 선례입니다.",
     "신호위반": "교차로 신호등에 적색 신호가 명확하게 등화되었음에도 이를 완전히 무시하고 속도를 줄이지 않은 채 무리하게 교차로 내부로 진입하다가, 자신의 정상적인 신호(녹색등)를 보고 교차로에 진입한 상대 차량의 측면을 충돌한 대형 사고입니다. 법원은 신호등의 규제 효력을 신뢰하고 진입한 피해 차량의 신뢰보호원칙을 적극 인정하고, 신호위반 차량에게 전적인 귀책 사유를 물어 100:0 일방 과실을 인정한 판결입니다.",
     "진로변경": "동일 방향으로 평행 주행하던 차량 중 하나가 후행 차량과의 충분한 안전거리를 확보하지 않거나 차로 변경 신호(방향지시등)를 켜지 않은 상태에서 급작스럽게 진로를 변경하여 직진 중인 타 차량과 충돌한 사고입니다. 법원은 변경 차량의 무리한 차로 침범이 주원인임을 밝히며 기본 과실 70%를 선고하고, 직진 차량 역시 전방 주시 태만과 급제동 불이행 책임을 고려해 30%의 주의 의무를 부과한 대표적인 판례입니다.",
-    "과속": "제한속도를 초과하여 고속으로 주행하던 중 급작스러운 상황에 제동 거리를 확보하지 못해 충돌한 사고입니다. 법원은 초과된 속도가 사고 회피 불능과 피해 심화에 직간접적 기여를 했다고 판시하며, 과속 차량에게 20%의 과실을 가산 적용한 판결입니다."
+    "과속": "제한속도를 초과하여 고속으로 주행하던 중 급작스러운 상황에 제동 거리를 확보하지 못해 충돌한 사고입니다. 법원은 초과된 속도가 사고 회피 불능과 피해 심화에 직간접적 기여를 했다고 판시하며, 과속 차량에게 20%의 과실을 가산 적용한 판결입니다.",
+    "좌회전": "신호기 및 교통정리가 없는 교차로에서 좌회전하려던 차량이 직진 주행 중이던 차량의 통행을 방해하며 발생한 충돌 사고입니다. 법원은 좌회전 차량이 도로교통법 제25조 및 제26조에 따른 양보 및 안전 확인 의무를 다하지 않은 것을 주된 사고 원인으로 보아 좌회전 차량의 주과실(70%)을 적용하고, 직진 차량의 일부 감속 및 주의 의무 태만을 고려하여 30%의 책임을 배분하는 기본 70:30 판결을 선고한 대표 사례입니다.",
+    "교차로진입": "교통정리가 없는 교차로에 진입하려던 차량이 통행 우선순위가 있는 차량의 통행을 방해하며 발생한 충돌 사고입니다. 법원은 교차로에 진입하려는 차량이 도로교통법 제26조에 따른 서행 및 양보 의무를 다하지 않은 것을 주된 사고 원인으로 보아 진입 차량의 주과실을 적용하고, 상대 차량의 주의 의무 태만을 일부 반영하여 책임을 배분합니다."
 }
 
 DETAILED_CASE_LAWS = {
@@ -512,7 +626,7 @@ def enrich_case_laws(case_laws: List[Dict], event_types: List[str]) -> List[Dict
     enriched = []
     # 주된 위반 이벤트를 찾아 판례 요약 매칭용 키로 활용
     primary_event = "진로변경" # 기본 디폴트
-    for ev in ["신호위반충돌위험", "신호위반", "중앙선침범", "노외진입", "과속"]:
+    for ev in ["신호위반충돌위험", "신호위반", "중앙선침범", "노외진입", "과속", "좌회전", "교차로진입"]:
         if ev in event_types:
             primary_event = ev
             break
@@ -520,7 +634,11 @@ def enrich_case_laws(case_laws: List[Dict], event_types: List[str]) -> List[Dict
     summary_key = "노외진입" if primary_event == "노외진입" else (
         "중앙선침범" if primary_event == "중앙선침범" else (
             "신호위반" if primary_event in ("신호위반", "신호위반충돌위험") else (
-                "과속" if primary_event == "과속" else "진로변경"
+                "과속" if primary_event == "과속" else (
+                    "좌회전" if primary_event == "좌회전" else (
+                        "교차로진입" if primary_event == "교차로진입" else "진로변경"
+                    )
+                )
             )
         )
     )
@@ -529,7 +647,9 @@ def enrich_case_laws(case_laws: List[Dict], event_types: List[str]) -> List[Dict
     default_ratio = "진입차 80% : 직진차 20%" if summary_key == "노외진입" else (
         "침범차 100% : 피해차 0%" if summary_key == "중앙선침범" else (
             "신호위반차 100% : 피해차 0%" if summary_key == "신호위반" else (
-                "과속차 20% 가산 적용" if summary_key == "과속" else "변경차 70% : 직진차 30%"
+                "과속차 20% 가산 적용" if summary_key == "과속" else (
+                    "좌회전차 70% : 직진차 30%" if summary_key in ("좌회전", "교차로진입") else "변경차 70% : 직진차 30%"
+                )
             )
         )
     )
@@ -582,6 +702,8 @@ LAW_MAP = {
     "과속":       "도로교통법 제17조(자동차 등의 속도)",
     "보행자위협":  "도로교통법 제27조(보행자의 보호)",
     "노외진입":    "도로교통법 제18조(횡단 등의 금지 - 도로 외의 장소로부터의 진입)",
+    "좌회전":     "도로교통법 제25조(교차로 통행방법)",
+    "교차로진입":  "도로교통법 제26조(교통정리가 없는 교차로에서의 양보운전)",
 }
 
 def evaluate_car_to_car_fault(
@@ -638,7 +760,7 @@ def evaluate_car_to_car_fault(
     # 노외진입 위반자가 있으면 그가 A차량
     # 진로변경 위반자가 있으면 그가 A차량
     a_violators: set = critical_violators or outside_violators or lane_change_violators
-    b_violators: set = speed_violators - a_violators  # 과속은 B 차량 과실 가산 요소
+    b_violators: set = speed_violators - a_violators  # 과속은 피해 차량(B) 과실 가산 요소
 
     # A/B 차량 ID 설명 문자열
     def _ids(s: set) -> str:
@@ -650,7 +772,7 @@ def evaluate_car_to_car_fault(
         a_str = _ids(critical_violators)
         applied_desc.append(
             f"일방과실(100:0) 판단 {a_str}: 한쪽 차량의 중대한 법규 위반(신호위반/중앙선침범)으로 사고가 발생하였고, "
-            "상대 차량은 정상 주행 중이었으며 당시 상황을 예견하거나 회피하기 어려웠음 "
+            "피해 차량은 정상 주행 중이었으며 당시 상황을 예견하거나 회피하기 어려웠음 "
             "(도로교통법 제5조·제13조 기준)"
         )
         return 100, 0, applied_desc
@@ -659,12 +781,12 @@ def evaluate_car_to_car_fault(
     if has_outside_entry:
         out_ids = _ids(outside_violators)
         
-        # 노외진입 + 직진 차량 과속 -> B차량 과실 20% 가산(가해차 80%에서 20% 감산하여 60:40 적용)
+        # 노외진입 + 직진 차량 과속 -> 피해 차량 과실 20% 가산(가해차 80%에서 20% 감산하여 60:40 적용)
         if has_speeding:
             sp_ids = _ids(speed_violators)
             applied_desc.append(
                 f"과실 조정(60:40): 노외(도로 외 장소) 진입 차량 {out_ids}의 기본 과실(80%)에서 "
-                f"상대 직진 차량 {sp_ids}의 과속에 따른 주의의무 위반(+20%)을 반영하여 60:40 적용 "
+                f"피해 직진 차량 {sp_ids}의 과속에 따른 주의의무 위반(+20%)을 반영하여 60:40 적용 "
                 "(손해보험협회 과실비율 인정기준 차44-1 기준)"
             )
             return 60, 40, applied_desc
@@ -683,8 +805,8 @@ def evaluate_car_to_car_fault(
         cv_ids = _ids(critical_violators)
         lc_ids = _ids(lane_change_violators)
         applied_desc.append(
-            f"과실 조정(80:20): A차량 중과실 위반 {cv_ids} + B차량 진로변경 주의의무 위반 {lc_ids} 경합. "
-            "일방 중과실을 상쇄하더라도 A차량 과실이 더 크므로 80:20 적용"
+            f"과실 조정(80:20): 가해 차량(A) 중과실 위반 {cv_ids} + 피해 차량(B) 진로변경 주의의무 위반 {lc_ids} 경합. "
+            "일방 중과실을 상쇄하더라도 가해 차량(A) 과실이 더 크므로 80:20 적용"
         )
         return 80, 20, applied_desc
 
@@ -706,7 +828,7 @@ def evaluate_car_to_car_fault(
             else:
                 applied_desc.append(
                     f"과실 조정(50:50): 진로변경 차량 {lc_ids}의 기본 과실(70%)에서 "
-                    f"상대 직진 차량 {sp_ids}의 과속에 따른 주의의무 위반(+20%) 반영하여 50:50으로 보정 "
+                    f"피해 직진 차량 {sp_ids}의 과속에 따른 주의의무 위반(+20%) 반영하여 50:50으로 보정 "
                     "(손해보험협회 과실비율 인정기준 참조)"
                 )
                 return 50, 50, applied_desc
@@ -733,9 +855,18 @@ def evaluate_car_to_car_fault(
         new_b = min(100, base_b + 20)
         new_a = 100 - new_b
         applied_desc.append(
-            f"과실 가산: B차량 {sp_ids} 과속 감지 → B차량 과실 +20% 반영 (기본 {base_b}% → {new_b}%)"
+            f"과실 가산: 피해 차량(B) {sp_ids} 과속 감지 → 피해 차량(B) 과실 +20% 반영 (기본 {base_b}% → {new_b}%)"
         )
         return new_a, new_b, applied_desc
+
+    # ── 4.5. 신호등 없는 교차로 좌회전/진입 기본 룰 (70:30) ──
+    if "좌회전" in event_types or "교차로진입" in event_types:
+        applied_desc.append(
+            "기본 과실(70:30) 적용: 신호등이 없거나 교통정리가 없는 교차로에서 좌회전 또는 진입/합류를 진행한 가해 차량(A)은 "
+            "통행 우선권이 있는 피해 직진 차량(B)보다 주의의무가 크므로 가해 차량 70% : 피해 차량 30% 기본 과실을 반영합니다. "
+            "(도로교통법 제25조·제26조 기준)"
+        )
+        return 70, 30, applied_desc
 
     # ── 5. 해당 없음 → DB 기반 기본 과실비율 유지 ──
     return base_a, base_b, applied_desc
@@ -756,7 +887,7 @@ def build_result(
             f"교차로 내 타 차선에서 정상 진입한 차량 간의 급격한 근접 및 충돌 위협 상황이 감지되었습니다. "
         )
         if is_one_sided_fault:
-            situation_summary += "상대 차량은 정상 신호에 따라 주행 중이었으며 당시 사고를 예견하거나 회피하기 어려웠던 것으로 판단됩니다."
+            situation_summary += "피해 차량은 정상 신호에 따라 주행 중이었으며 당시 사고를 예견하거나 회피하기 어려웠던 것으로 판단됩니다."
         else:
             situation_summary += f"사고 유형({accident_name})의 DB 기준 및 양측 위반 상황을 토대로 과실 비율을 판단하였습니다."
 
@@ -765,9 +896,9 @@ def build_result(
             f"이는 도로교통법 제5조 신호위반에 따른 중과실 사고 유발 행위입니다. "
         )
         if is_one_sided_fault:
-            accident_cause += "상대 차량에게 사고 예견 및 회피 가능성을 인정하기 어려운 상황이므로 A차량의 일방 과실(100%)로 산정하였습니다."
+            accident_cause += "피해 차량에게 사고 예견 및 회피 가능성을 인정하기 어려운 상황이므로 가해 차량의 일방 과실(100%)로 산정하였습니다."
         else:
-            accident_cause += f"양측의 과실 요소를 고려하여 A차량 과실 {fault_a}%로 산정하였습니다."
+            accident_cause += f"양측의 과실 요소를 고려하여 가해 차량 과실 {fault_a}%로 산정하였습니다."
             
     elif "노외진입" in event_types:
         situation_summary = (
@@ -782,7 +913,23 @@ def build_result(
         if modifier_desc:
             accident_cause += f" 적용된 수정 요소: {', '.join(modifier_desc)}"
         else:
-            accident_cause += f" 진입 차량의 고도 주의의무 위반을 주된 요인으로 보아 A차량(진입차) 과실 {fault_a}%, B차량(직진차) 과실 {fault_b}%로 산정하였습니다."
+            accident_cause += f" 진입 차량의 고도 주의의무 위반을 주된 요인으로 보아 가해 차량(진입차) 과실 {fault_a}%, 피해 차량(직진차) 과실 {fault_b}%로 산정하였습니다."
+            
+    elif "좌회전" in event_types or "교차로진입" in event_types:
+        situation_summary = (
+            f"블랙박스 영상 분석 결과, 신호기 및 교통정리가 없는 교차로에서 좌회전 또는 진입/합류를 시도한 차량과 "
+            f"직진 방향에서 진행 중이던 차량 간의 충돌 상황이 감지되었습니다. "
+            f"사고 유형({accident_name})을 기준으로 과실비율을 산정하였습니다."
+        )
+        accident_cause = (
+            f"신호기 없는 교차로에서 진입/합류 또는 좌회전을 시도하는 차량은 도로교통법 제25조 및 제26조에 따라 "
+            f"직진 차량 또는 통행 우선순위가 있는 차량에 진로를 양보하고 안전을 충분히 확인할 주의의무가 있으나, "
+            f"이를 다하지 않아 사고를 유발하였습니다. 다만 직진 차량 또한 전방주시 및 감속 의무를 일부 태만히 하였음이 인정됩니다. "
+        )
+        if modifier_desc:
+            accident_cause += f" 적용된 수정 요소: {', '.join(modifier_desc)}"
+        else:
+            accident_cause += f" 진입/좌회전 차량의 주과실을 반영하여 가해 차량(진입/좌회전차) 과실 {fault_a}%, 피해 차량(직진차) 과실 {fault_b}%로 산정하였습니다."
             
     elif event_types:
         situation_summary = (
@@ -791,16 +938,16 @@ def build_result(
             f"사고 유형({accident_name})을 기준으로 과실비율을 산정하였습니다."
         )
         if is_one_sided_fault:
-            situation_summary += " 상대 차량은 정상 주행 중이었으며 당해 사고를 예견하거나 회피하기 어려웠던 상황으로 판단됩니다."
+            situation_summary += " 피해 차량은 정상 주행 중이었으며 당해 사고를 예견하거나 회피하기 어려웠던 상황으로 판단됩니다."
 
         accident_cause = (
             f"영상에서 {', '.join(event_types)}이(가) 감지되었으며 "
             f"이는 사고의 주요 원인으로 판단됩니다. "
         )
         if is_one_sided_fault:
-            accident_cause += "중대한 법규 위반으로 인해 상대방의 예견·회피 가능성이 극히 낮아 A차량의 일방 과실(100%)로 산정하였습니다."
+            accident_cause += "중대한 법규 위반으로 인해 피해 차량의 예견·회피 가능성이 극히 낮아 가해 차량의 일방 과실(100%)로 산정하였습니다."
         else:
-            accident_cause += f"A차량의 과실을 {fault_a}%로 산정하였습니다."
+            accident_cause += f"가해 차량의 과실을 {fault_a}%로 산정하였습니다."
             
         if modifier_desc:
             accident_cause += f" 적용된 수정 요소: {', '.join(modifier_desc)}"
@@ -876,7 +1023,7 @@ def analyze_fault(
     event_types, violation_map = detect_events(supabase, video_id, records)
 
     # 3. accident_type 매칭 (Python 직접 매칭)
-    accident_type    = match_accident_type(supabase, event_types)
+    accident_type    = match_accident_type(supabase, event_types, records)
     accident_type_id = accident_type["accident_type_id"] if accident_type else None
     base_a           = accident_type["base_fault_a"]      if accident_type else 50
     base_b           = accident_type["base_fault_b"]      if accident_type else 50

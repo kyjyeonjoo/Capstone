@@ -697,6 +697,22 @@ document.addEventListener('DOMContentLoaded', () => {
                         circleBEl.style.background = `conic-gradient(${colorB} ${faultB}%, #f1f5f9 0)`;
                     }
 
+                    // 피해 차주 / 가해 차주 레이블 동적 변경
+                    const labelAEl = document.getElementById('labelA');
+                    const labelBEl = document.getElementById('labelB');
+                    if (labelAEl && labelBEl) {
+                        if (faultA > faultB) {
+                            labelAEl.textContent = '가해 차주 (A)';
+                            labelBEl.textContent = '피해 차주 (B)';
+                        } else if (faultB > faultA) {
+                            labelAEl.textContent = '피해 차주 (A)';
+                            labelBEl.textContent = '가해 차주 (B)';
+                        } else {
+                            labelAEl.textContent = '차량 A (쌍방)';
+                            labelBEl.textContent = '차량 B (쌍방)';
+                        }
+                    }
+
                     // 판단 근거 업데이트
                     const judgmentCard = document.querySelector('#result-view .law-content');
                     if (judgmentCard && data.situation_summary) {
@@ -934,6 +950,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 const colorB = faultB >= 70 ? '#ef4444' : faultB >= 40 ? '#f97316' : '#22c55e';
                 circleAEl.style.background = `conic-gradient(${colorA} ${faultA}%, #f1f5f9 0)`;
                 circleBEl.style.background = `conic-gradient(${colorB} ${faultB}%, #f1f5f9 0)`;
+            }
+
+            // 피해 차주 / 가해 차주 레이블 동적 변경
+            const labelAEl = document.getElementById('labelA');
+            const labelBEl = document.getElementById('labelB');
+            if (labelAEl && labelBEl) {
+                if (faultA > faultB) {
+                    labelAEl.textContent = '가해 차주 (A)';
+                    labelBEl.textContent = '피해 차주 (B)';
+                } else if (faultB > faultA) {
+                    labelAEl.textContent = '피해 차주 (A)';
+                    labelBEl.textContent = '가해 차주 (B)';
+                } else {
+                    labelAEl.textContent = '차량 A (쌍방)';
+                    labelBEl.textContent = '차량 B (쌍방)';
+                }
             }
 
             const title = data.video_record?.original_name 
