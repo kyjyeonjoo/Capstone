@@ -2,6 +2,9 @@
 *.pt
 models/
 
+*.csv
+evl/
+
 # Python 임시 파일 및 캐시 제외
 __pycache__/
 *.py[cod]
