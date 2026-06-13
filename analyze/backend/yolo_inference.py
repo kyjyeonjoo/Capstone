@@ -4,6 +4,7 @@ import uuid
 import os
 import warnings
 import math
+from statistics import median
 
 # PyTorch 2.4+의 autocast FutureWarning 숨김 처리
 warnings.filterwarnings("ignore", category=FutureWarning, message=r".*torch\.cuda\.amp\.autocast.*")
@@ -24,18 +25,29 @@ CLASS_NAME_MAP = {
     "crosswalk":    "crosswalk",
     "center_line":  "yellowline",  # 중앙선(황색) → yellowline
     "white_line":   "white_line",  # 백색 차선
-    "helmet":       "helmet",
-    "no_helmet":    "no_helmet",
 }
 
 VEHICLE_TYPES = {"car", "bus", "truck", "motorcycle"}
+IGNORED_ANALYSIS_CLASSES = {"helmet", "no_helmet"}
+
+YOLOV8_CLASS_CONFIDENCE = {
+    "vehicle": 0.30,
+    "red_light": 0.30,
+    "green_light": 0.30,
+    "yellow_light": 0.30,
+    "left_light": 0.30,
+    "stop_line": 0.30,
+    "crosswalk": 0.30,
+    "center_line": 0.30,
+    "white_line": 0.30,
+}
 
 def get_base_object_type(object_type):
     if object_type.startswith("[") and "]" in object_type:
         return object_type.split("]", 1)[1].strip()
     return object_type
 
-def reconcile_vehicle_track_ids(records, fps, max_gap_seconds=2.5):
+def reconcile_vehicle_track_ids(records, fps, max_gap_seconds=1.0):
     """Merge vehicle track fragments that were split by brief occlusion or scale change."""
     vehicle_tracks = {}
     for record in records:
@@ -93,13 +105,14 @@ def reconcile_vehicle_track_ids(records, fps, max_gap_seconds=2.5):
             normalized_distance = center_distance / scale
             area_change = abs(math.log(max(start_area, 1) / max(end_area, 1)))
 
-            # A short gap may include a large apparent-size change near impact.
+            # Keep fragment merging conservative in crowded scenes. A loose
+            # merge can join two similarly colored vehicles into one path.
             score = normalized_distance + (area_change * 0.35) + (gap / max_gap_frames)
-            if normalized_distance <= 2.5 and area_change <= 2.2 and score < best_score:
+            if normalized_distance <= 1.4 and area_change <= 1.2 and score < best_score:
                 best_score = score
                 best_previous = previous_root
 
-        if best_previous is not None and best_score <= 3.2:
+        if best_previous is not None and best_score <= 2.2:
             parent[current["track_id"]] = best_previous
 
     def root(track_id):
@@ -138,7 +151,7 @@ def extract_histogram(frame, bbox):
     return hist
 
 class HistIoUTracker:
-    def __init__(self, iou_thresh=0.1, max_frames=3, missing_history=150):
+    def __init__(self, iou_thresh=0.1, max_frames=3, missing_history=30):
         self.tracks = {}  # {track_id: {"box": bbox, "frames_missing": 0, "hist": hist}}
         self.history = {} # 휴지통 {track_id: {"hist": hist, "frames_missing": 0}}
         self.next_id = 1
@@ -198,15 +211,43 @@ class HistIoUTracker:
             det_hist = detected_boxes[d_idx]["hist"]
             if det_hist is None: continue
             
-            best_score = 0.50  # 빡빡했던 유사도 기준을 살짝 완화
+            best_score = 0.72
             best_t_id = -1
             for t_id, t_data in candidate_pool.items():
                 if t_id in matched_history: continue
-                if t_data["hist"] is not None:
-                    score = cv2.compareHist(det_hist, t_data["hist"], cv2.HISTCMP_CORREL)
-                    if score > best_score:
-                        best_score = score
-                        best_t_id = t_id
+                if t_data["hist"] is None:
+                    continue
+
+                score = cv2.compareHist(det_hist, t_data["hist"], cv2.HISTCMP_CORREL)
+                previous_box = t_data.get("box")
+                if previous_box is not None:
+                    previous_cx = (previous_box[0] + previous_box[2]) / 2
+                    previous_cy = (previous_box[1] + previous_box[3]) / 2
+                    current_box = det["bbox"]
+                    current_cx = (current_box[0] + current_box[2]) / 2
+                    current_cy = (current_box[1] + current_box[3]) / 2
+                    previous_area = max(
+                        1,
+                        (previous_box[2] - previous_box[0])
+                        * (previous_box[3] - previous_box[1]),
+                    )
+                    current_area = max(
+                        1,
+                        (current_box[2] - current_box[0])
+                        * (current_box[3] - current_box[1]),
+                    )
+                    scale = max(40.0, math.sqrt(previous_area), math.sqrt(current_area))
+                    normalized_distance = math.hypot(
+                        current_cx - previous_cx,
+                        current_cy - previous_cy,
+                    ) / scale
+                    area_change = abs(math.log(current_area / previous_area))
+                    if normalized_distance > 2.0 or area_change > 1.4:
+                        continue
+
+                if score > best_score:
+                    best_score = score
+                    best_t_id = t_id
                         
             if best_t_id != -1:
                 reid_matches.append((d_idx, best_t_id))
@@ -235,7 +276,11 @@ class HistIoUTracker:
         for t_id in unmatched_tracks:
             self.tracks[t_id]["frames_missing"] += 1
             if self.tracks[t_id]["frames_missing"] > self.max_frames:
-                self.history[t_id] = {"hist": self.tracks[t_id]["hist"], "frames_missing": 0}
+                self.history[t_id] = {
+                    "box": self.tracks[t_id]["box"],
+                    "hist": self.tracks[t_id]["hist"],
+                    "frames_missing": 0,
+                }
                 del self.tracks[t_id]
                 
         for t_id in list(self.history.keys()):
@@ -341,6 +386,8 @@ def analyze_video_with_yolo(video_path, weights_paths, video_id="WEB_UP_001"):
 
     orig_fps = cap.get(cv2.CAP_PROP_FPS)
     total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     print(f"[YOLO] 영상 정보 — FPS: {orig_fps}, 전체 프레임 수: {total_video_frames}")
     if orig_fps <= 0: orig_fps = 30
 
@@ -350,7 +397,10 @@ def analyze_video_with_yolo(video_path, weights_paths, video_id="WEB_UP_001"):
     extracted_records = []
     frame_idx = 0
     processed_count = 0
-    tracker = HistIoUTracker(iou_thresh=0.1, max_frames=3, missing_history=150)
+    tracker = HistIoUTracker(iou_thresh=0.1, max_frames=3, missing_history=30)
+    previous_motion_gray = None
+    camera_translation_ratios = []
+    camera_rotation_degrees = []
     
     while True:
         ret, frame = cap.read()
@@ -359,7 +409,53 @@ def analyze_video_with_yolo(video_path, weights_paths, video_id="WEB_UP_001"):
         if frame_idx % frame_interval != 0:
             frame_idx += 1
             continue
-            
+
+        # 배경 특징점의 전역 이동을 이용해 카메라 회전/이동 정도를 추정합니다.
+        # 차량 궤적만으로는 주차장 측면 출차와 회전교차로 합류가 비슷하게
+        # 보이므로, 장면 전체가 회전 중인지 구분하기 위한 보조값입니다.
+        motion_gray = cv2.cvtColor(
+            cv2.resize(frame, (320, 180)),
+            cv2.COLOR_BGR2GRAY,
+        )
+        if previous_motion_gray is not None:
+            previous_points = cv2.goodFeaturesToTrack(
+                previous_motion_gray,
+                maxCorners=160,
+                qualityLevel=0.01,
+                minDistance=8,
+                blockSize=7,
+            )
+            if previous_points is not None and len(previous_points) >= 12:
+                current_points, status, _ = cv2.calcOpticalFlowPyrLK(
+                    previous_motion_gray,
+                    motion_gray,
+                    previous_points,
+                    None,
+                    winSize=(21, 21),
+                    maxLevel=3,
+                )
+                if current_points is not None and status is not None:
+                    valid_previous = previous_points[status.reshape(-1) == 1]
+                    valid_current = current_points[status.reshape(-1) == 1]
+                    if len(valid_previous) >= 10:
+                        transform, _ = cv2.estimateAffinePartial2D(
+                            valid_previous,
+                            valid_current,
+                            method=cv2.RANSAC,
+                            ransacReprojThreshold=2.5,
+                        )
+                        if transform is not None:
+                            tx = float(transform[0, 2])
+                            ty = float(transform[1, 2])
+                            rotation = math.degrees(
+                                math.atan2(transform[1, 0], transform[0, 0])
+                            )
+                            camera_translation_ratios.append(
+                                math.hypot(tx, ty) / math.hypot(320, 180)
+                            )
+                            camera_rotation_degrees.append(abs(rotation))
+        previous_motion_gray = motion_gray
+
         # 모든 모델에 대해 추론하고 1차 수집
         all_detections = []
         for m_name, model_info in models.items():
@@ -367,7 +463,9 @@ def analyze_video_with_yolo(video_path, weights_paths, video_id="WEB_UP_001"):
             model = model_info["model"]
             
             if m_type == "yolov8":
-                conf_val = 0.30 if len(models) > 1 or m_name == "통합" else 0.70
+                # 신호등과 정지선은 영상에서 매우 작게 나타나므로 원시 후보를
+                # 낮은 기준으로 받은 뒤 클래스별 신뢰도로 다시 거릅니다.
+                conf_val = 0.30
                 results = model(frame, conf=conf_val, verbose=False)
                 if len(results) > 0:
                     result = results[0]
@@ -384,6 +482,44 @@ def analyze_video_with_yolo(video_path, weights_paths, video_id="WEB_UP_001"):
                             cls_name = names[cls_id]
                         if not cls_name:
                             cls_name = f"class_{cls_id}"
+
+                        if cls_name in IGNORED_ANALYSIS_CLASSES:
+                            continue
+
+                        minimum_confidence = YOLOV8_CLASS_CONFIDENCE.get(
+                            cls_name,
+                            0.30,
+                        )
+                        if conf < minimum_confidence:
+                            continue
+
+                        if cls_name in {
+                            "red_light",
+                            "green_light",
+                            "yellow_light",
+                            "left_light",
+                        }:
+                            box_center_y = (y1 + y2) / 2
+                            box_width_ratio = max(0.0, x2 - x1) / max(
+                                1.0,
+                                frame_width,
+                            )
+                            box_height_ratio = max(0.0, y2 - y1) / max(
+                                1.0,
+                                frame_height,
+                            )
+                            box_area_ratio = (
+                                max(0.0, x2 - x1)
+                                * max(0.0, y2 - y1)
+                                / max(1.0, frame_width * frame_height)
+                            )
+                            if (
+                                box_center_y > frame_height * 0.68
+                                or box_area_ratio > 0.02
+                                or box_width_ratio > 0.04
+                                or box_height_ratio > 0.04
+                            ):
+                                continue
 
                         # 첫 탐지 시 디버그 로그
                         if processed_count == 0 and len(all_detections) == 0:
@@ -419,6 +555,9 @@ def analyze_video_with_yolo(video_path, weights_paths, video_id="WEB_UP_001"):
                             cls_name = names[cls_id]
                         if not cls_name:
                             cls_name = f"class_{cls_id}"
+
+                        if cls_name in IGNORED_ANALYSIS_CLASSES:
+                            continue
 
                         # 첫 탐지 시 raw 값 전체 출력 (모델 nc 불일치 원인 파악용)
                         if processed_count == 0 and len(all_detections) == 0:
@@ -469,7 +608,9 @@ def analyze_video_with_yolo(video_path, weights_paths, video_id="WEB_UP_001"):
                 "bbox_y1": det["bbox"][1],           
                 "bbox_x2": det["bbox"][2],           
                 "bbox_y2": det["bbox"][3],           
-                "confidence": det['confidence'] 
+                "confidence": det['confidence'],
+                "frame_width": frame_width,
+                "frame_height": frame_height,
             }
             extracted_records.append(record)
             
@@ -481,10 +622,27 @@ def analyze_video_with_yolo(video_path, weights_paths, video_id="WEB_UP_001"):
         extracted_records,
         fps=float(orig_fps),
     )
+    camera_motion_ratio = (
+        median(camera_translation_ratios)
+        if camera_translation_ratios
+        else 0.0
+    )
+    camera_rotation_degree = (
+        median(camera_rotation_degrees)
+        if camera_rotation_degrees
+        else 0.0
+    )
+    for record in extracted_records:
+        record["camera_motion_ratio"] = round(camera_motion_ratio, 6)
+        record["camera_rotation_degree"] = round(camera_rotation_degree, 4)
     print(f"[YOLO] 분석 완료 — 처리 프레임: {processed_count}, 총 탐지 기록 수: {len(extracted_records)}")
     return {
         "total_frames": processed_count,
         "records": extracted_records,
         "fps": float(orig_fps),
-        "total_video_frames": total_video_frames
+        "total_video_frames": total_video_frames,
+        "frame_width": frame_width,
+        "frame_height": frame_height,
+        "camera_motion_ratio": camera_motion_ratio,
+        "camera_rotation_degree": camera_rotation_degree,
     }

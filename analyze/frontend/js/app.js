@@ -1,4 +1,53 @@
 document.addEventListener('DOMContentLoaded', () => {
+    function normalizeFaultRatio(data = {}) {
+        let faultA = Number(data.fault_ratio_a ?? data.fault_a ?? 50);
+        let faultB = Number(data.fault_ratio_b ?? data.fault_b ?? (100 - faultA));
+
+        if (!Number.isFinite(faultA)) faultA = 50;
+        if (!Number.isFinite(faultB)) faultB = 100 - faultA;
+
+        faultA = Math.min(100, Math.max(0, Math.round(faultA)));
+        faultB = Math.min(100, Math.max(0, Math.round(faultB)));
+
+        if (faultA + faultB !== 100) {
+            faultB = 100 - faultA;
+        }
+        return { faultA, faultB };
+    }
+
+    function renderFaultRatio(data) {
+        const { faultA, faultB } = normalizeFaultRatio(data);
+        const ratioCircles = document.querySelectorAll('.ratio-value');
+        if (ratioCircles.length >= 2) {
+            ratioCircles[0].textContent = faultA;
+            ratioCircles[1].textContent = faultB;
+        }
+
+        const circleAEl = document.querySelector('.ratio-circle.a');
+        const circleBEl = document.querySelector('.ratio-circle.b');
+        if (circleAEl && circleBEl) {
+            const colorA = faultA >= 70 ? '#ef4444' : faultA >= 40 ? '#f97316' : '#22c55e';
+            const colorB = faultB >= 70 ? '#ef4444' : faultB >= 40 ? '#f97316' : '#22c55e';
+            circleAEl.style.background = `conic-gradient(${colorA} ${faultA}%, #f1f5f9 0)`;
+            circleBEl.style.background = `conic-gradient(${colorB} ${faultB}%, #f1f5f9 0)`;
+        }
+
+        const labelAEl = document.getElementById('labelA');
+        const labelBEl = document.getElementById('labelB');
+        if (labelAEl && labelBEl) {
+            if (faultA > faultB) {
+                labelAEl.textContent = '가해 차주 (A)';
+                labelBEl.textContent = '피해 차주 (B)';
+            } else if (faultB > faultA) {
+                labelAEl.textContent = '피해 차주 (A)';
+                labelBEl.textContent = '가해 차주 (B)';
+            } else {
+                labelAEl.textContent = '차량 A (쌍방)';
+                labelBEl.textContent = '차량 B (쌍방)';
+            }
+        }
+
+    }
     // --- Toast Notification ---
     function showToast(message, type = 'info') {
         const container = document.getElementById('toastContainer');
@@ -107,6 +156,18 @@ document.addEventListener('DOMContentLoaded', () => {
         views.forEach(v => v.classList.remove('active'));
         document.getElementById(viewId).classList.add('active');
     }
+
+    function setPrintViewClass() {
+        document.body.classList.remove('print-chat', 'print-result');
+        document.body.classList.add(
+            currentView === 'chat-view' ? 'print-chat' : 'print-result'
+        );
+    }
+
+    window.addEventListener('beforeprint', setPrintViewClass);
+    window.addEventListener('afterprint', () => {
+        document.body.classList.remove('print-chat', 'print-result');
+    });
 
     // --- Authentication ---
     if (loginBtnNode) loginBtnNode.addEventListener('click', () => authModal.classList.add('active'));
@@ -678,40 +739,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         tableBody.innerHTML = `<tr><td colspan="3" style="padding:1rem;text-align:center;color:var(--text-secondary);">탐지된 객체가 없습니다.</td></tr>`;
                     }
 
-                    // 과실비율 반영
-                    const faultA = data.fault_ratio_a ?? 50;
-                    const faultB = data.fault_ratio_b ?? 50;
-
-                    const ratioCircles = document.querySelectorAll('.ratio-value');
-                    if (ratioCircles.length >= 2) {
-                        ratioCircles[0].textContent = faultA;
-                        ratioCircles[1].textContent = faultB;
-                    }
-
-                    const circleAEl = document.querySelector('.ratio-circle.a');
-                    const circleBEl = document.querySelector('.ratio-circle.b');
-                    if (circleAEl && circleBEl) {
-                        const colorA = faultA >= 70 ? '#ef4444' : faultA >= 40 ? '#f97316' : '#22c55e';
-                        const colorB = faultB >= 70 ? '#ef4444' : faultB >= 40 ? '#f97316' : '#22c55e';
-                        circleAEl.style.background = `conic-gradient(${colorA} ${faultA}%, #f1f5f9 0)`;
-                        circleBEl.style.background = `conic-gradient(${colorB} ${faultB}%, #f1f5f9 0)`;
-                    }
-
-                    // 피해 차주 / 가해 차주 레이블 동적 변경
-                    const labelAEl = document.getElementById('labelA');
-                    const labelBEl = document.getElementById('labelB');
-                    if (labelAEl && labelBEl) {
-                        if (faultA > faultB) {
-                            labelAEl.textContent = '가해 차주 (A)';
-                            labelBEl.textContent = '피해 차주 (B)';
-                        } else if (faultB > faultA) {
-                            labelAEl.textContent = '피해 차주 (A)';
-                            labelBEl.textContent = '가해 차주 (B)';
-                        } else {
-                            labelAEl.textContent = '차량 A (쌍방)';
-                            labelBEl.textContent = '차량 B (쌍방)';
-                        }
-                    }
+                    renderFaultRatio(data);
 
                     // 판단 근거 업데이트
                     const judgmentCard = document.querySelector('#result-view .law-content');
@@ -936,38 +964,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             });
 
-            // Update UI with the loaded details
-            const faultA = data.fault_a ?? 50;
-            const faultB = data.fault_b ?? 50;
-            const ratioCircles = document.querySelectorAll('.ratio-value');
-            if (ratioCircles.length >= 2) {
-                ratioCircles[0].textContent = faultA;
-                ratioCircles[1].textContent = faultB;
-            }
-            const circleAEl = document.querySelector('.ratio-circle.a');
-            const circleBEl = document.querySelector('.ratio-circle.b');
-            if (circleAEl && circleBEl) {
-                const colorA = faultA >= 70 ? '#ef4444' : faultA >= 40 ? '#f97316' : '#22c55e';
-                const colorB = faultB >= 70 ? '#ef4444' : faultB >= 40 ? '#f97316' : '#22c55e';
-                circleAEl.style.background = `conic-gradient(${colorA} ${faultA}%, #f1f5f9 0)`;
-                circleBEl.style.background = `conic-gradient(${colorB} ${faultB}%, #f1f5f9 0)`;
-            }
-
-            // 피해 차주 / 가해 차주 레이블 동적 변경
-            const labelAEl = document.getElementById('labelA');
-            const labelBEl = document.getElementById('labelB');
-            if (labelAEl && labelBEl) {
-                if (faultA > faultB) {
-                    labelAEl.textContent = '가해 차주 (A)';
-                    labelBEl.textContent = '피해 차주 (B)';
-                } else if (faultB > faultA) {
-                    labelAEl.textContent = '피해 차주 (A)';
-                    labelBEl.textContent = '가해 차주 (B)';
-                } else {
-                    labelAEl.textContent = '차량 A (쌍방)';
-                    labelBEl.textContent = '차량 B (쌍방)';
-                }
-            }
+            // 새 분석 응답(fault_ratio_a/b)과 DB 상세 응답(fault_a/b)을 동일하게 처리
+            renderFaultRatio(data);
 
             const title = data.video_record?.original_name 
                 ? data.video_record.original_name.split('.')[0] 

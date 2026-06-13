@@ -31,7 +31,19 @@ if not OPENROUTER_API_KEY:
 
 # yolo_inference.py에서 로직 가져오기
 from yolo_inference import analyze_video_with_yolo
-from fault_analyzer import analyze_fault, enrich_case_laws, fetch_law_api_cases
+from fault_analyzer import (
+    LAW_MAP,
+    analyze_fault,
+    enrich_case_laws,
+    fetch_law_api_cases,
+    get_display_event_types,
+    infer_result_event_types,
+)
+from chat_policy import (
+    CHAT_DOMAIN_REJECTION,
+    build_chat_system_prompt,
+    is_traffic_chat_question,
+)
 
 app = FastAPI()
 app.add_middleware(
@@ -478,6 +490,12 @@ def get_result_detail(result_id: int):
             except Exception as e:
                 print(f"[DB] event 조회 오류: {e}")
 
+        internal_events = list(detected_events)
+        for event_type in infer_result_event_types(data):
+            if event_type not in internal_events:
+                internal_events.append(event_type)
+        display_events = get_display_event_types(internal_events)
+
         # 3. 관련 object_detection 조회 (YOLO 검출 테이블 복원용)
         records = []
         if video_id:
@@ -502,21 +520,31 @@ def get_result_detail(result_id: int):
                 ).eq("accident_type_id", accident_type_id).limit(3).execute()
                 raw_cases = case_res.data or []
                 # 동적 복원 및 가공 헬퍼 통과!
-                case_laws = enrich_case_laws(raw_cases, detected_events)
+                case_laws = enrich_case_laws(raw_cases, internal_events)
             except Exception as e:
                 print(f"[DB] case_law 조회 오류: {e}")
-        if not case_laws and detected_events:
-            internal_events = list(detected_events)
-            if "교차로진입" in detected_events and "진로변경" in detected_events:
+        if not case_laws and internal_events:
+            if "교차로진입" in internal_events and "진로변경" in internal_events:
                 internal_events.append("측면합류충돌위험")
             case_laws = fetch_law_api_cases(internal_events, limit=3)
 
         # 5. 프론트엔드가 요구하는 포맷으로 필드 병합 및 바인딩
-        data["detected_events"] = detected_events
+        data["detected_events"] = display_events
         data["records"] = records
         data["case_laws"] = case_laws
         data["accident_type_name"] = data.get("accident_type", {}).get("accident_name") if data.get("accident_type") else "불명확"
-        data["confidence_level"] = "높음" if len(detected_events) > 0 else "보통"
+        data["confidence_level"] = "높음" if len(internal_events) > 0 else "보통"
+        if (
+            not data.get("legal_basis")
+            or "미확정" in str(data.get("legal_basis"))
+        ):
+            laws = []
+            for event_type in internal_events:
+                law = LAW_MAP.get(event_type)
+                if law and law not in laws:
+                    laws.append(law)
+            if laws:
+                data["legal_basis"] = " / ".join(laws)
 
         return data
     except Exception as e:
@@ -664,7 +692,10 @@ def chat_with_ai(data: ChatRequest, authorization: Optional[str] = Header(None))
     if not user_id:
         raise HTTPException(status_code=401, detail="인증된 사용자를 확인할 수 없습니다.")
 
-    if not is_traffic_chat_question(data.user_question):
+    if not is_traffic_chat_question(
+        data.user_question,
+        has_accident_context=bool(data.accident_data or data.result_id),
+    ):
         save_chat_history_safe(
             user_id=user_id,
             question=data.user_question,
@@ -679,15 +710,7 @@ def chat_with_ai(data: ChatRequest, authorization: Optional[str] = Header(None))
         "Content-Type": "application/json"
     }
 
-    system_prompt = (
-        "당신은 'AI 교통사고 법률 보조 시스템'의 전문 상담 챗봇입니다. "
-        "답변 가능 범위는 교통사고, 교통법규, 과실 비율, 보험, 사고 관련 법률과 판례로 제한합니다. "
-        "위 주제에 해당하지 않는 질문에는 다음 문장만 답변하세요: "
-        f"'{CHAT_DOMAIN_REJECTION}' "
-        "사용자가 제공한 블랙박스 영상 분석 결과를 바탕으로 사고 과실 비율을 추정하고, 관련 법률 및 대법원 판례를 근거로 전문적인 조언을 제공합니다. "
-        "분석 결과에 연동된 도로교통법 조문과 판례 요약(사실관계 및 대법원 판결의 요지)을 최대한 자세하게 해설해 주세요. "
-        "친절하고 명확하게 답변하며, 분석된 결과가 있으면 이를 십분 활용하여 답변하세요."
-    )
+    system_prompt = build_chat_system_prompt()
 
     if data.accident_data:
         system_prompt += f"\n\n[영상 분석 결과 컨텍스트 (적용 법규 및 관련 판례 정보 포함)]\n{str(data.accident_data)}"
@@ -884,69 +907,6 @@ def delete_result(result_id: int, authorization: Optional[str] = Header(None)):
 
 class RenameRequest(BaseModel):
     new_name: str
-
-CHAT_DOMAIN_KEYWORDS = (
-    "교통", "사고", "교통사고", "차량", "자동차", "차대차", "블랙박스", "블박",
-    "과실", "과실비율", "가해", "피해", "위반", "법규", "도로교통법", "법률",
-    "판례", "대법원", "법원", "소송", "합의", "보험", "보험사", "손해배상",
-    "대인", "대물", "보상", "수리비", "정지선", "신호", "신호위반", "중앙선",
-    "진로변경", "차선변경", "좌회전", "우회전", "직진", "교차로", "횡단보도",
-    "노외진입", "회전교차로", "추돌", "충돌", "접촉", "후미", "급정거",
-    "상대차", "운전자", "운행", "안전거리", "속도", "과속", "위자료",
-    "차", "차선", "차로", "차주", "운전", "운전자", "상대", "상대방", "상대측",
-    "내차", "내 차", "상대차량", "상대 차량", "사고처리", "사고 처리", "처리",
-    "책임", "비율", "몇대몇", "몇 대 몇", "7:3", "8:2", "6:4", "5:5",
-    "70:30", "80:20", "60:40", "50:50", "100:0", "0:100",
-    "경찰", "신고", "진단서", "수리", "견적", "렌트", "렌트카", "대차",
-    "분쟁", "분심위", "소송", "민사", "형사", "벌점", "범칙금", "과태료",
-    "사거리", "삼거리", "골목", "주차장", "고속도로", "회전", "합류", "끼어들기",
-    "일시정지", "정차", "주정차", "후진", "유턴", "양보", "방향지시등", "깜빡이",
-    "속도위반", "안전운전", "전방주시", "급제동", "꼬리물기",
-    "청구", "배상", "손해", "손실", "합의금", "치료비", "병원", "입원", "통원",
-    "상해", "부상", "진료", "후유증", "휴업손해", "감가", "격락손해",
-    "정비소", "공업사", "폐차", "견인", "견인비", "번호판", "차량번호",
-    "목격자", "cctv", "CCTV", "영상", "증거", "진술", "조사", "현장",
-    "가드레일", "표지판", "표지", "노면표시", "황색선", "백색선", "실선",
-    "점선", "버스", "택시", "화물차", "트럭", "오토바이", "이륜차",
-    "자전거", "보행자", "어린이보호구역", "스쿨존", "횡단", "불법주차",
-    "주차", "출차", "입차", "개문", "문콕", "후방", "측면", "정면",
-    "앞차", "뒷차", "선행차", "후행차", "차간거리", "끼어듦", "급차선",
-    "항소", "고소", "고발", "처벌", "면허", "벌금", "합의서", "내용증명",
-    "과실상계", "구상권", "자차", "자손", "자상", "무보험", "책임보험",
-)
-
-CHAT_EXCLUDED_KEYWORDS = (
-    "점심", "저녁", "아침", "메뉴", "맛집", "레시피", "요리", "날씨", "여행",
-    "숙소", "호텔", "게임", "영화", "드라마", "노래", "음악", "주식", "코인",
-    "파이썬", "자바", "코딩", "코드", "프로그램", "개발", "수학", "번역",
-)
-
-CHAT_DOMAIN_REJECTION = (
-    "저는 교통사고 법률 상담 전문 챗봇으로, 교통 관련 질문에만 답변드릴 수 있습니다. "
-    "교통사고나 관련 법률에 대해 궁금하신 점이 있으시면 질문해 주세요."
-)
-
-def is_traffic_chat_question(question: str) -> bool:
-    normalized = (question or "").replace(" ", "").lower()
-    if not normalized:
-        return False
-    if any(keyword.replace(" ", "").lower() in normalized for keyword in CHAT_DOMAIN_KEYWORDS):
-        return True
-    if any(keyword.replace(" ", "").lower() in normalized for keyword in CHAT_EXCLUDED_KEYWORDS):
-        return False
-
-    # 분석 결과를 선택한 뒤 이어지는 짧은 후속 질문은 맥락상 교통사고 질문으로 허용합니다.
-    followup_phrases = (
-        "왜", "맞아", "맞나요", "틀려", "틀린", "이유", "근거", "설명", "자세히",
-        "어떻게", "뭐야", "뭔데", "가능", "불가능", "더", "다시", "정리", "요약",
-        "상세", "그러면", "그럼", "이거", "저거", "결과", "판단", "비교",
-    )
-    if any(phrase in normalized for phrase in followup_phrases):
-        return len(normalized) <= 60
-
-    # 아주 짧은 일상형 후속 질문은 분석 결과 맥락에서 나온 것으로 보고 허용합니다.
-    # 명확히 제외된 주제는 위에서 이미 걸러집니다.
-    return len(normalized) <= 18
 
 def save_chat_history_safe(user_id: str, question: str, answer: str, result_id: Optional[int] = None):
     try:

@@ -5,6 +5,7 @@ import os
 import sys
 from pathlib import Path
 from statistics import mean
+from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -65,7 +66,9 @@ def collect_pairs(root: Path) -> Dict[str, Tuple[Path, Path]]:
 
 def collect_category_pairs(root: Path, source_folder_name: str) -> Dict[str, Tuple[Path, Path]]:
     label_folder_name = source_folder_name
-    if source_folder_name.startswith("TS_"):
+    if source_folder_name.startswith("VS_"):
+        label_folder_name = "VL_" + source_folder_name[3:]
+    elif source_folder_name.startswith("TS_"):
         label_folder_name = "TL_" + source_folder_name[3:]
 
     source_dirs = [
@@ -74,7 +77,7 @@ def collect_category_pairs(root: Path, source_folder_name: str) -> Dict[str, Tup
     ]
     label_dirs = [
         path for path in root.rglob(label_folder_name)
-        if path.is_dir() and "라벨링데이터" in str(path)
+        if path.is_dir() and ("라벨링데이터" in str(path) or "라벨데이터" in str(path))
     ]
 
     labels = {}
@@ -95,13 +98,58 @@ def collect_category_pairs(root: Path, source_folder_name: str) -> Dict[str, Tup
     }
 
 
+def select_balanced_pairs(
+    category_pairs: Dict[str, Tuple[Path, Path]],
+    category_limit: int,
+) -> List[Tuple[str, Tuple[Path, Path]]]:
+    """Select deterministic samples while spreading common fault ratios."""
+    ratio_groups = defaultdict(list)
+    for name, paths in sorted(category_pairs.items()):
+        try:
+            label = load_label(paths[0])
+            ratio = (
+                label.get("accident_negligence_rateA"),
+                label.get("accident_negligence_rateB"),
+            )
+        except Exception:
+            ratio = (None, None)
+        ratio_groups[ratio].append((name, paths))
+
+    ordered_groups = sorted(
+        ratio_groups.values(),
+        key=lambda group: (-len(group), group[0][0]),
+    )
+    selected = []
+    while ordered_groups and len(selected) < category_limit:
+        remaining_groups = []
+        for group in ordered_groups:
+            if group and len(selected) < category_limit:
+                selected.append(group.pop(0))
+            if group:
+                remaining_groups.append(group)
+        ordered_groups = remaining_groups
+    return selected
+
+
 def select_category_pairs(root: Path, folder_names: List[str], category_limit: int) -> Dict[str, Tuple[Path, Path]]:
     selected = {}
     for folder_name in folder_names:
         category_pairs = collect_category_pairs(root, folder_name)
-        for name, paths in list(category_pairs.items())[:category_limit]:
+        for name, paths in select_balanced_pairs(category_pairs, category_limit):
             selected[f"{folder_name}:{name}"] = paths
     return selected
+
+
+def summarize_by_category(rows: List[Dict]) -> Dict[str, Dict]:
+    grouped = defaultdict(list)
+    for row in rows:
+        if row.get("mean_abs_error") == "":
+            continue
+        grouped[row.get("category_folder", "미분류")].append(row)
+    return {
+        category: summarize(category_rows)
+        for category, category_rows in sorted(grouped.items())
+    }
 
 
 def predict_fault(video_path: Path, weights_path: Path) -> Dict:
@@ -332,8 +380,21 @@ def main():
             print(f"[ERROR] {name}: {exc}")
 
     write_csv(rows, Path(args.output))
-    print(json.dumps(summarize([row for row in rows if row.get("mean_abs_error") != ""]), ensure_ascii=False, indent=2))
+    valid_rows = [row for row in rows if row.get("mean_abs_error") != ""]
+    report = {
+        "overall": summarize(valid_rows),
+        "categories": summarize_by_category(valid_rows),
+    }
+    summary_path = Path(args.output).with_name(
+        Path(args.output).stem + "_summary.json"
+    )
+    summary_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(json.dumps(report, ensure_ascii=False, indent=2))
     print(f"[SAVE] {args.output}")
+    print(f"[SAVE] {summary_path}")
 
 
 if __name__ == "__main__":

@@ -367,8 +367,7 @@ h2 { font-size: 1.25rem; }
     padding: 2rem;
     overflow-y: auto;
     position: relative;
-    max-width: 1200px;
-    margin: 0 auto;
+    max-width: none;
     width: 100%;
 }
 
@@ -444,8 +443,9 @@ h2 { font-size: 1.25rem; }
 
 .result-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(360px, 0.75fr) minmax(520px, 1.25fr);
     gap: 1.5rem;
+    width: 100%;
 }
 
 .result-card {
@@ -530,6 +530,245 @@ h2 { font-size: 1.25rem; }
     margin-left: 0.5rem;
     color: var(--text-secondary);
     line-height: 1.6;
+}
+
+@page {
+    size: A4 portrait;
+    margin: 14mm;
+}
+
+@media print {
+    html,
+    body,
+    #app,
+    .main-content,
+    .view,
+    #result-view {
+        width: 100% !important;
+        height: auto !important;
+        min-height: 0 !important;
+        overflow: visible !important;
+    }
+
+    body {
+        display: block;
+        background: #ffffff !important;
+        color: #111827;
+        font-size: 11pt;
+    }
+
+    .sidebar,
+    #upload-view,
+    #objects-view,
+    .result-header button {
+        display: none !important;
+    }
+
+    .main-content {
+        display: block;
+        padding: 0 !important;
+        margin: 0 !important;
+        max-width: none !important;
+    }
+
+    body.print-result #result-view {
+        display: block !important;
+        animation: none !important;
+    }
+
+    body.print-result #chat-view {
+        display: none !important;
+    }
+
+    .result-header {
+        display: block;
+        margin: 0 0 8mm;
+    }
+
+    .result-header h2 {
+        font-size: 18pt;
+        line-height: 1.35;
+    }
+
+    .result-grid {
+        display: block !important;
+        width: 100%;
+    }
+
+    .result-card {
+        width: 100%;
+        margin: 0 0 7mm;
+        padding: 6mm;
+        border: 1px solid #cbd5e1;
+        border-radius: 0;
+        background: #ffffff !important;
+        box-shadow: none;
+        backdrop-filter: none;
+        overflow: visible !important;
+    }
+
+    /* 과실비율과 판단 근거는 각각 전체 폭으로 출력합니다. */
+    .result-card:not(.full-width) {
+        break-inside: avoid-page;
+        page-break-inside: avoid;
+    }
+
+    /* 판례는 길 수 있으므로 페이지를 넘어 자연스럽게 이어지게 합니다. */
+    .result-card.full-width {
+        display: block;
+        break-inside: auto;
+        page-break-inside: auto;
+    }
+
+    .result-card.full-width .law-content,
+    .result-card.full-width .law-content p,
+    .result-card.full-width .law-content hr {
+        break-inside: auto;
+        page-break-inside: auto;
+    }
+
+    .card-title {
+        font-size: 14pt;
+        margin-bottom: 4mm;
+        break-after: avoid-page;
+        page-break-after: avoid;
+    }
+
+    .law-content {
+        overflow: visible !important;
+        max-height: none !important;
+    }
+
+    .law-content p,
+    .law-content li {
+        color: #1f2937 !important;
+        font-size: 11pt;
+        line-height: 1.75;
+        orphans: 3;
+        widows: 3;
+    }
+
+    .law-content p {
+        margin-bottom: 3mm;
+    }
+
+    .law-content ul {
+        margin: 2mm 0 0 5mm;
+    }
+
+    .law-content a {
+        color: #111827 !important;
+        text-decoration: none;
+        overflow-wrap: anywhere;
+    }
+
+    .fault-ratio-display {
+        height: auto;
+        min-height: 38mm;
+    }
+
+    .ratio-circle,
+    .ratio-circle::after {
+        print-color-adjust: exact;
+        -webkit-print-color-adjust: exact;
+    }
+
+    body.print-chat #result-view {
+        display: none !important;
+    }
+
+    body.print-chat #chat-view {
+        display: block !important;
+        width: 100% !important;
+        height: auto !important;
+        overflow: visible !important;
+        animation: none !important;
+    }
+
+    body.print-chat .chat-container {
+        display: block;
+        width: 100%;
+        height: auto !important;
+        overflow: visible !important;
+        border: 0;
+        border-radius: 0;
+        background: #ffffff !important;
+        box-shadow: none;
+        backdrop-filter: none;
+    }
+
+    body.print-chat .chat-header {
+        display: block;
+        padding: 0 0 6mm;
+        margin-bottom: 6mm;
+        border-bottom: 2px solid #334155;
+        background: #ffffff !important;
+    }
+
+    body.print-chat #chatReportSelect,
+    body.print-chat #deleteChatHistoryBtn,
+    body.print-chat .chat-header > span,
+    body.print-chat .chat-input-area {
+        display: none !important;
+    }
+
+    body.print-chat .chat-header::before {
+        content: '교통사고 법률 상담 채팅 내역';
+        display: block;
+        color: #111827;
+        font-size: 18pt;
+        font-weight: 700;
+    }
+
+    body.print-chat .chat-messages {
+        display: block;
+        width: 100%;
+        height: auto !important;
+        overflow: visible !important;
+        padding: 0;
+        background: #ffffff !important;
+    }
+
+    body.print-chat .message {
+        display: block;
+        width: 100%;
+        max-width: none;
+        margin: 0 0 5mm;
+        padding: 4mm 5mm;
+        border: 1px solid #cbd5e1;
+        border-radius: 0;
+        color: #111827 !important;
+        background: #ffffff !important;
+        box-shadow: none;
+        line-height: 1.7;
+        break-inside: avoid-page;
+        page-break-inside: avoid;
+    }
+
+    body.print-chat .message.user {
+        border-left: 4px solid #2563eb;
+    }
+
+    body.print-chat .message.bot {
+        border-left: 4px solid #475569;
+    }
+
+    body.print-chat .message.user::before,
+    body.print-chat .message.bot::before {
+        display: block;
+        margin-bottom: 2mm;
+        font-size: 9pt;
+        font-weight: 700;
+        color: #475569;
+    }
+
+    body.print-chat .message.user::before {
+        content: '사용자';
+    }
+
+    body.print-chat .message.bot::before {
+        content: 'AI 법률 보조';
+    }
 }
 
 /* Chat View */
