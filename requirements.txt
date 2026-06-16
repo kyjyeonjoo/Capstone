@@ -6,6 +6,7 @@ python-multipart
 pydantic
 torch
 torchvision
+ultralytics
 opencv-python
 pandas
 requests

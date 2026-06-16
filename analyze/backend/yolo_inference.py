@@ -4,6 +4,8 @@ import uuid
 import os
 import warnings
 import math
+import numpy as np
+from types import SimpleNamespace
 from statistics import median
 
 # PyTorch 2.4+의 autocast FutureWarning 숨김 처리
@@ -290,6 +292,116 @@ class HistIoUTracker:
 
         return detected_boxes
 
+class _ByteTrackDetections:
+    """Small adapter that gives Ultralytics BYTETracker the fields it expects."""
+
+    def __init__(self, detections):
+        self.detections = list(detections)
+        boxes = []
+        confs = []
+        classes = []
+        for det in self.detections:
+            x1, y1, x2, y2 = det["bbox"]
+            boxes.append([
+                (x1 + x2) / 2,
+                (y1 + y2) / 2,
+                max(1, x2 - x1),
+                max(1, y2 - y1),
+            ])
+            confs.append(float(det.get("confidence", 0.0)))
+            classes.append(0)
+
+        self.xywh = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
+        self.conf = np.asarray(confs, dtype=np.float32)
+        self.cls = np.asarray(classes, dtype=np.float32)
+
+    def __len__(self):
+        return len(self.detections)
+
+    def __getitem__(self, index):
+        indices = np.arange(len(self.detections))[index]
+        indices = np.atleast_1d(indices).astype(int)
+        return _ByteTrackDetections([self.detections[i] for i in indices])
+
+
+class VehicleByteTracker:
+    """Track only vehicle detections with ByteTrack, falling back to HistIoU."""
+
+    def __init__(self):
+        self.byte_tracker = None
+        self.fallback_tracker = HistIoUTracker(
+            iou_thresh=0.1,
+            max_frames=3,
+            missing_history=30,
+        )
+        try:
+            from ultralytics.trackers.byte_tracker import BYTETracker
+
+            args = SimpleNamespace(
+                track_high_thresh=0.30,
+                track_low_thresh=0.05,
+                new_track_thresh=0.30,
+                match_thresh=0.8,
+                track_buffer=30,
+                fuse_score=True,
+            )
+            self.byte_tracker = BYTETracker(args)
+            print("[Tracker] ByteTrack enabled for vehicle detections.")
+        except Exception as exc:
+            print(f"[Tracker] ByteTrack unavailable, using HistIoU fallback: {exc}")
+
+    def update(self, detections, frame):
+        vehicle_indices = [
+            index for index, det in enumerate(detections)
+            if get_base_object_type(det.get("name", "")) in VEHICLE_TYPES
+        ]
+        if not vehicle_indices:
+            return detections
+
+        vehicle_detections = [detections[index] for index in vehicle_indices]
+        if self.byte_tracker is None:
+            tracked_vehicles = self.fallback_tracker.update(vehicle_detections, frame)
+            for local_index, det in enumerate(tracked_vehicles):
+                detections[vehicle_indices[local_index]] = det
+            return detections
+
+        try:
+            tracks = self.byte_tracker.update(
+                _ByteTrackDetections(vehicle_detections),
+                frame,
+            )
+        except Exception as exc:
+            print(f"[Tracker] ByteTrack update failed, using HistIoU fallback: {exc}")
+            tracked_vehicles = self.fallback_tracker.update(vehicle_detections, frame)
+            for local_index, det in enumerate(tracked_vehicles):
+                detections[vehicle_indices[local_index]] = det
+            return detections
+
+        unmatched = set(range(len(vehicle_detections)))
+        for track in tracks:
+            if len(track) < 5:
+                continue
+            track_box = [float(track[0]), float(track[1]), float(track[2]), float(track[3])]
+            track_id = int(track[4])
+
+            best_local_index = None
+            best_iou = 0.0
+            for local_index in list(unmatched):
+                iou = compute_iou(track_box, vehicle_detections[local_index]["bbox"])
+                if iou > best_iou:
+                    best_iou = iou
+                    best_local_index = local_index
+
+            if best_local_index is not None and best_iou >= 0.05:
+                vehicle_detections[best_local_index]["track_id"] = track_id
+                unmatched.remove(best_local_index)
+
+        for index in vehicle_indices:
+            local_det = detections[index]
+            if "track_id" not in local_det:
+                local_det["track_id"] = None
+        return detections
+
 def analyze_video_with_yolo(video_path, weights_paths, video_id="WEB_UP_001"):
     """
     FastAPI 서버 내부에서 비동기 호출을 받거나, 직접 실행되어 비디오를 분석하고
@@ -397,7 +509,7 @@ def analyze_video_with_yolo(video_path, weights_paths, video_id="WEB_UP_001"):
     extracted_records = []
     frame_idx = 0
     processed_count = 0
-    tracker = HistIoUTracker(iou_thresh=0.1, max_frames=3, missing_history=30)
+    tracker = VehicleByteTracker()
     previous_motion_gray = None
     camera_translation_ratios = []
     camera_rotation_degrees = []
@@ -594,7 +706,7 @@ def analyze_video_with_yolo(video_path, weights_paths, video_id="WEB_UP_001"):
             if not is_dup:
                 merged_detections.append(det)
             
-        # 통합된 BBox들을 트래커에 통과시켜 track_id 부여
+        # 차량 객체만 ByteTrack으로 추적하고, 도로 표식/신호등은 프레임별 탐지로 유지
         tracked_detections = tracker.update(merged_detections, frame)
         
         for det in tracked_detections:
@@ -602,7 +714,7 @@ def analyze_video_with_yolo(video_path, weights_paths, video_id="WEB_UP_001"):
                 "id": str(uuid.uuid4()),               
                 "video_id": video_id,                  
                 "frame": frame_idx,
-                "track_id": det["track_id"], # 새로 추가된 트래킹 ID
+                "track_id": det.get("track_id", 0) or 0,
                 "object_type": det['name'],            
                 "bbox_x1": det["bbox"][0],           
                 "bbox_y1": det["bbox"][1],           
